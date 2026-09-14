@@ -123,6 +123,7 @@ import { initTheme, preloadCodeHighlighter, stopThemeWatcher } from "./modes/int
 import { handleConfigCommand } from "./package-manager-cli.js";
 import { isLocalPath } from "./utils/paths.js";
 import { readPipedStdin } from "./utils/piped-stdin.js";
+import { ensureDirectoryHardened } from "./utils/secure-dir.js";
 
 function collectSettingsDiagnostics(
 	settingsManager: SettingsManager,
@@ -1134,6 +1135,8 @@ export async function main(args: string[], options?: MainOptions) {
 		waitForDaemonWorkerStartupGate();
 	}
 	installFileLogSink();
+	// Windows ACLs, not mode bits, decide who can read the agent directory.
+	ensureDirectoryHardened(getAgentDir());
 	if (isDaemonCatalogProcess()) {
 		await runDaemonCatalogProcess();
 		return;

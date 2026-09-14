@@ -5,9 +5,15 @@ import { getBinDir } from "../config.js";
 import { recordOrphanProcessState } from "../core/orphan-process-journal.js";
 import { spawnHidden, spawnSyncHidden } from "./child-process.js";
 
+export type ShellKind = "posix" | "powershell" | "cmd";
+
 export interface ShellConfig {
 	shell: string;
 	args: string[];
+	/** Shell family: selects platform-correct command wrapping and help text. */
+	kind?: ShellKind;
+	/** Rewrite the user command so the process exit code reflects its outcome. */
+	wrapCommand?: (command: string) => string;
 }
 
 /** System32\bash.exe is the WSL launcher (runs Linux-side), so %SystemRoot% matches are only a last resort. */
@@ -55,46 +61,78 @@ function findBashOnPath(): string | null {
 	return null;
 }
 
+/** Classify a shell by its executable name so commands can be wrapped correctly. */
+export function classifyShell(shell: string): ShellKind {
+	const name = win32.basename(shell).toLowerCase();
+	if (name === "powershell.exe" || name === "powershell" || name === "pwsh.exe" || name === "pwsh") {
+		return "powershell";
+	}
+	if (name === "cmd.exe" || name === "cmd") {
+		return "cmd";
+	}
+	return "posix";
+}
+
+/**
+ * PowerShell exits 0 for a failed cmdlet and reports native command failures only
+ * through $LASTEXITCODE, so map the command outcome onto the process exit code the
+ * tool reports.
+ */
+export function wrapPowerShellCommand(command: string): string {
+	return `${command}\nexit $(if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 })`;
+}
+
+function shellConfigFor(shell: string, kind: ShellKind): ShellConfig {
+	if (kind === "powershell") {
+		return {
+			shell,
+			args: ["-NoProfile", "-NonInteractive", "-Command"],
+			kind,
+			wrapCommand: wrapPowerShellCommand,
+		};
+	}
+	if (kind === "cmd") {
+		return { shell, args: ["/d", "/s", "/c"], kind };
+	}
+	return { shell, args: ["-c"], kind };
+}
+
+/**
+ * Shells that ship with Windows. Windows PowerShell 5.1 is present on every
+ * supported Windows version, so it is the default shell and no POSIX shell has to
+ * be installed; ComSpec (cmd.exe) is the fallback.
+ */
+function windowsShellCandidates(): string[] {
+	return [
+		win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+	];
+}
+
 /**
  * Resolve shell configuration based on platform and an optional explicit shell path.
  * Resolution order:
  * 1. User-specified shellPath
- * 2. On Windows: Git Bash in known locations, then bash on PATH
+ * 2. On Windows: Windows PowerShell, then ComSpec (cmd.exe)
  * 3. On Unix: /bin/bash, then bash on PATH, then fallback to sh
  */
 export function getShellConfig(customShellPath?: string): ShellConfig {
 	// 1. Check user-specified shell path
 	if (customShellPath) {
 		if (existsSync(customShellPath)) {
-			return { shell: customShellPath, args: ["-c"] };
+			return shellConfigFor(customShellPath, classifyShell(customShellPath));
 		}
 		throw new Error(`Custom shell path not found: ${customShellPath}`);
 	}
 
 	if (process.platform === "win32") {
-		// 2. Try Git Bash in known locations, including the per-user root used by a
-		// non-elevated Git for Windows install.
-		const paths = windowsGitBashCandidates(homedir(), process.env.ProgramFiles, process.env["ProgramFiles(x86)"]);
-
-		for (const path of paths) {
-			if (existsSync(path)) {
-				return { shell: path, args: ["-c"] };
+		// 2. Windows PowerShell, then cmd.exe. Neither needs a POSIX shell.
+		for (const candidate of windowsShellCandidates()) {
+			if (existsSync(candidate)) {
+				return shellConfigFor(candidate, "powershell");
 			}
 		}
-
-		// 3. Fallback: search bash.exe on PATH (Cygwin, MSYS2, WSL, etc.)
-		const bashOnPath = findBashOnPath();
-		if (bashOnPath) {
-			return { shell: bashOnPath, args: ["-c"] };
-		}
-
-		throw new Error(
-			`No bash shell found. Options:\n` +
-				`  1. Install Git for Windows: https://git-scm.com/download/win\n` +
-				`  2. Add your bash to PATH (Cygwin, MSYS2, etc.)\n` +
-				"  3. Set shellPath in settings.json\n\n" +
-				`Searched Git Bash in:\n${paths.map((p) => `  ${p}`).join("\n")}`,
-		);
+		const comSpec = process.env.ComSpec?.trim() || "cmd.exe";
+		return shellConfigFor(comSpec, "cmd");
 	}
 
 	// Unix: try /bin/bash, then bash on PATH, then fallback to sh

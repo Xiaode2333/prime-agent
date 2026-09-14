@@ -31,8 +31,9 @@ function resolveEnvOrLiteral(config: string): string | undefined {
 
 function executeWithConfiguredShell(command: string): { executed: boolean; value: string | undefined } {
 	try {
-		const { shell, args } = getShellConfig();
-		const result = spawnSyncHidden(shell, [...args, command], {
+		const config = getShellConfig();
+		const { shell, args } = config;
+		const result = spawnSyncHidden(shell, [...args, config.wrapCommand ? config.wrapCommand(command) : command], {
 			encoding: "utf-8",
 			timeout: 10000,
 			stdio: ["ignore", "pipe", "ignore"],

@@ -20,8 +20,11 @@ import { getTextOutput, invalidArgText, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.js";
 
+/** The shell the bash tool drives on this platform. */
+const SHELL_LABEL = process.platform === "win32" ? "PowerShell" : "bash";
+
 const bashSchema = Type.Object({
-	command: Type.String({ description: "Bash command to execute" }),
+	command: Type.String({ description: "Shell command to execute" }),
 	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
 	allowDestructiveGit: Type.Optional(
 		Type.Boolean({
@@ -72,12 +75,14 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 	return {
 		exec: (command, cwd, { onData, signal, timeout, env }) => {
 			return new Promise((resolve, reject) => {
-				const { shell, args } = getShellConfig(options?.shellPath);
+				const config = getShellConfig(options?.shellPath);
+				const { shell, args } = config;
 				if (!existsSync(cwd)) {
-					reject(new Error(`Working directory does not exist: ${cwd}\nCannot execute bash commands.`));
+					reject(new Error(`Working directory does not exist: ${cwd}\nCannot execute shell commands.`));
 					return;
 				}
-				const child = spawnHidden(shell, [...args, command], {
+				const shellCommand = config.wrapCommand ? config.wrapCommand(command) : command;
+				const child = spawnHidden(shell, [...args, shellCommand], {
 					cwd,
 					detached: process.platform !== "win32",
 					env: env ?? getShellEnv(),
@@ -648,8 +653,11 @@ export function createBashToolDefinition(
 	const definition: ToolDefinition<typeof bashSchema, BashToolDetails | undefined, BashRenderState> = {
 		name: "bash",
 		label: "bash",
-		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds. Destructive git discard commands (git checkout -- ., git checkout ., git clean -f..., git reset --hard, git restore .) are refused while uncommitted changes exist; retry with allowDestructiveGit: true only when the discard is intentional.`,
-		promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
+		description: `Execute a ${SHELL_LABEL} command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds. Destructive git discard commands (git checkout -- ., git checkout ., git clean -f..., git reset --hard, git restore .) are refused while uncommitted changes exist; retry with allowDestructiveGit: true only when the discard is intentional.`,
+		promptSnippet:
+			process.platform === "win32"
+				? "Execute PowerShell commands (Get-ChildItem, Select-String, etc.)"
+				: "Execute bash commands (ls, grep, find, etc.)",
 		parameters: bashSchema,
 		async execute(
 			_toolCallId,

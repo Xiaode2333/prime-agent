@@ -19,7 +19,13 @@ vi.mock("child_process", async (importOriginal) => {
 	return { ...actual, spawnSync: mocks.spawnSync };
 });
 
-import { orderWindowsBashCandidates, resolveKernelBashShell, windowsGitBashCandidates } from "../src/utils/shell.js";
+import {
+	getShellConfig,
+	orderWindowsBashCandidates,
+	resolveKernelBashShell,
+	windowsGitBashCandidates,
+	wrapPowerShellCommand,
+} from "../src/utils/shell.js";
 
 const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 
@@ -114,5 +120,61 @@ describe("windowsGitBashCandidates", () => {
 		} finally {
 			mocks.existsSync.mockReturnValue(false);
 		}
+	});
+});
+
+describe("getShellConfig on win32", () => {
+	const powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+
+	it("uses Windows PowerShell without any POSIX shell installed", () => {
+		stubWin32();
+		mocks.existsSync.mockImplementation((path: string) => path === powershell);
+		const previousComSpec = process.env.ComSpec;
+		process.env.ComSpec = "C:\\Windows\\System32\\cmd.exe";
+		try {
+			const config = getShellConfig();
+			expect(config.shell).toBe(powershell);
+			expect(config.kind).toBe("powershell");
+			expect(config.args).toEqual(["-NoProfile", "-NonInteractive", "-Command"]);
+			expect(config.wrapCommand).toBeDefined();
+			expect(mocks.spawnSync).not.toHaveBeenCalled();
+		} finally {
+			if (previousComSpec === undefined) delete process.env.ComSpec;
+			else process.env.ComSpec = previousComSpec;
+		}
+	});
+
+	it("falls back to cmd.exe when Windows PowerShell is unavailable", () => {
+		stubWin32();
+		mocks.existsSync.mockReturnValue(false);
+		const previousComSpec = process.env.ComSpec;
+		process.env.ComSpec = "C:\\Windows\\System32\\cmd.exe";
+		try {
+			const config = getShellConfig();
+			expect(config.shell).toBe("C:\\Windows\\System32\\cmd.exe");
+			expect(config.kind).toBe("cmd");
+			expect(config.args).toEqual(["/d", "/s", "/c"]);
+			expect(config.wrapCommand).toBeUndefined();
+		} finally {
+			if (previousComSpec === undefined) delete process.env.ComSpec;
+			else process.env.ComSpec = previousComSpec;
+		}
+	});
+
+	it("classifies an explicit shellPath instead of assuming POSIX", () => {
+		stubWin32();
+		mocks.existsSync.mockReturnValue(true);
+		const config = getShellConfig("C:\\Program Files\\PowerShell\\7\\pwsh.exe");
+		expect(config.kind).toBe("powershell");
+		expect(config.args).toContain("-Command");
+	});
+});
+
+describe("wrapPowerShellCommand", () => {
+	it("maps the command outcome onto the process exit code", () => {
+		const wrapped = wrapPowerShellCommand("Get-ChildItem");
+		expect(wrapped.startsWith("Get-ChildItem\n")).toBe(true);
+		expect(wrapped).toContain("$LASTEXITCODE");
+		expect(wrapped).toContain("exit");
 	});
 });

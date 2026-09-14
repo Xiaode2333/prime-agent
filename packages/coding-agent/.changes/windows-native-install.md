@@ -4,3 +4,7 @@
 - Fixed the supervisor relaunch lock on Windows: the lock path was derived from the supervisor socket, which is a named pipe, so it resolved inside the `\\.\pipe\` namespace where no lock file can be created.
 - Made the Windows test surface runnable: Windows-aware fixtures for the tools-manager probes, `core.autocrlf=false` in the destructive-git guard repo, TESTS spill-directory env, `mkdirSync` instead of the POSIX `mkdir` binary, a `file://` hook URL for `--import`, and a documented skip for POSIX mode-bit assertions.
 - Windows tool-path hardening: `killProcessTree` uses absolute System32 `taskkill` with an error listener, environment merging folds keys case-insensitively on win32, and Git Bash discovery also covers the per-user install root that non-elevated Git for Windows installations use.
+- Windows no longer needs a POSIX shell: the shell tool defaults to Windows PowerShell (then `ComSpec`), PowerShell commands are wrapped so native exit codes survive, `shellPath` is classified per shell instead of assuming POSIX, and the tool description names the real shell.
+- Fixed the direct worker transport on Windows: `getDaemonSocketIdentity` returned `undefined` for named pipes, so every `get_direct_worker_transport` request failed and an interactive session could not attach.
+- Hardened `%USERPROFILE%\.prime` with a Windows ACL (`icacls` inheritance removal plus an owner-only grant) because mode bits are not access control on Windows.
+- Converted the bundled skills and skill docs from bash to PowerShell/Python examples.

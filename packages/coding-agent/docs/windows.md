@@ -8,9 +8,8 @@ Windows uses the npm release tarball route. Standalone Windows binaries are not 
 
 - Windows 10 1809 or Windows 11, x64.
 - Node.js 22.8.0 or newer. `winget install --id OpenJS.NodeJS.LTS -e` installs a suitable build.
-- [Git for Windows](https://git-scm.com/download/win), which provides the `bash.exe` that the agent's `bash()` tool needs.
 
-Node.js ships `npm`, so no separate package manager setup is required.
+Node.js ships `npm`, so no separate package manager setup is required. No POSIX shell, Git Bash, or WSL is needed.
 
 ## Install
 
@@ -60,25 +59,43 @@ Run `/login` on first launch to choose a subscription or API-key provider, or se
 
 The first launch prepares the Python kernel. This takes about 30 seconds and needs network access; later launches are offline.
 
-## Bash Shell
+## Shell
 
-Prime Agent requires a bash shell on Windows. Checked locations (in order):
+Prime Agent runs shell commands through Windows PowerShell, which ships with every
+supported Windows version. Git for Windows is not required, and Prime Agent never
+uses the bash shell.
 
-1. Custom path from `~/.prime/agent/settings.json`
-2. Git Bash (`C:\Program Files\Git\bin\bash.exe`)
-3. `bash.exe` on PATH (Cygwin, MSYS2, WSL)
+Resolution order for the shell used by the `bash` tool:
 
-For most users, [Git for Windows](https://git-scm.com/download/win) is sufficient.
+1. `shellPath` from `~/.prime/agent/settings.json`
+2. Windows PowerShell
+   (`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`)
+3. `ComSpec` (`cmd.exe`)
 
-`C:\Windows\System32\bash.exe` is the WSL launcher, so it starts a Linux-side shell rather than a Windows one. Prime Agent orders it last among PATH matches.
+Commands run as `powershell -NoProfile -NonInteractive -Command <command>`. The tool
+appends an exit-code mapping so a native command failure, such as `cmd /c exit 42`,
+is reported as exit code 42 rather than as a successful PowerShell run. A failing
+cmdlet reports exit code 1.
 
-## Custom Shell Path
+Set `shellPath` to use a different shell, such as PowerShell 7:
 
 ```json
 {
-  "shellPath": "C:\\cygwin64\\bin\\bash.exe"
+  "shellPath": "C:\\Program Files\\PowerShell\\7\\pwsh.exe"
 }
 ```
+
+Git Bash remains available through the same setting if you install it and prefer it:
+
+```json
+{
+  "shellPath": "C:\\Program Files\\Git\\bin\\bash.exe"
+}
+```
+
+The Python kernel's `bash()` runs inside the REPL and currently needs a POSIX shell
+for its status protocol. Set `shellPath` to Git Bash if you use `bash()` from the
+kernel, or stay on `ipython` cells, which need no shell.
 
 ## Troubleshooting
 

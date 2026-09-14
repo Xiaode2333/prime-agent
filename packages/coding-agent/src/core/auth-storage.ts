@@ -20,6 +20,7 @@ import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../config.js";
 import { realpathIfPresentSync, writeFileAtomicSync } from "../utils/atomic-file.js";
+import { hardenDirectoryAcl, hardenFileAcl } from "../utils/secure-dir.js";
 import { getPrimeCliConfigPath, PRIME_INFERENCE_PROVIDER_ID, type PrimeTeam } from "./prime-inference-auth.js";
 import { resolveConfigValue, resolveConfigValueUncached } from "./resolve-config-value.js";
 
@@ -106,6 +107,8 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		if (!existsSync(dir)) {
 			mkdirSync(dir, { recursive: true, mode: 0o700 });
 		}
+		// Mode bits are not access control on Windows; the ACL is the 0o700 here.
+		hardenDirectoryAcl(dir);
 	}
 
 	private ensureFileExists(): void {
@@ -131,6 +134,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		} finally {
 			closeSync(descriptor);
 		}
+		hardenFileAcl(this.authPath);
 	}
 
 	private acquireLockSyncWithRetry(path: string): () => void {
