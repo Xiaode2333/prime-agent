@@ -26,11 +26,14 @@ Prime Intellect is an open superintelligence lab building open-source AGI infras
 
 Default to the `prime` CLI for all Prime Intellect operations. If it is not installed:
 
-```bash
-uv tool install prime    # or: pip install prime
-prime login              # browser auth; or: prime config set-api-key
-prime config view        # verify configuration
+```powershell
+winget install --id astral-sh.uv -e   # Windows only, and only when uv is missing
+uv tool install prime                 # or: py -m pip install prime
+prime login                           # browser auth; or: prime config set-api-key
+prime config view                     # verify configuration
 ```
+
+Open a new terminal after installing `uv` or the CLI so the updated `PATH` applies. On macOS and Linux, skip the `winget` line; `uv tool install prime` and `pip install prime` work unchanged.
 
 The same package provides the Python SDKs (e.g. `prime_sandboxes`, `prime_tunnel`). Source: https://github.com/PrimeIntellect-ai/prime
 
@@ -38,16 +41,19 @@ The same package provides the Python SDKs (e.g. `prime_sandboxes`, `prime_tunnel
 
 Authoritative, current docs live at https://docs.primeintellect.ai. Any docs page is fetchable as Markdown by appending `.md` to its URL, and the full index is at https://docs.primeintellect.ai/llms.txt. When you need details not covered here (exact flags, API schemas, pricing, new features), fetch the live docs instead of guessing:
 
-```bash
-curl -s https://docs.primeintellect.ai/llms.txt                      # discover pages
-curl -s https://docs.primeintellect.ai/sandboxes/overview.md         # fetch a page as markdown
+```python
+import httpx
+print(httpx.get("https://docs.primeintellect.ai/llms.txt").text)                # discover pages
+print(httpx.get("https://docs.primeintellect.ai/sandboxes/overview.md").text)   # fetch a page as markdown
 ```
+
+The kernel has `httpx` already, so this needs no shell. In a shell, use `curl.exe -s "<url>"` on Windows (bare `curl` in PowerShell is an alias for `Invoke-WebRequest`) or `curl -s "<url>"` on macOS and Linux.
 
 The REST API is documented under `api-reference/` pages (OpenAPI spec: https://api.primeintellect.ai/openapi.json), with `https://api.primeintellect.ai` as the base URL.
 
 ## Command Quick Reference
 
-```bash
+```powershell
 # Environments Hub
 prime env list --search "math"      # discover environments
 prime env info owner/name           # inspect one
@@ -62,12 +68,13 @@ prime eval run owner/env --hosted --follow           # hosted eval with logs
 # Training
 prime lab setup                     # set up a Lab workspace (Hosted Training)
 prime train models                  # models, capacity, pricing
-prime train init && prime train rl.toml              # configure + launch a run
+prime train init                    # configure a run
+prime train rl.toml                 # launch the run
 
 # Sandboxes
 prime sandbox create python:3.11-slim --timeout-minutes 120
-prime sandbox run <sandbox-id> "python --version"
-prime sandbox delete <sandbox-id>
+prime sandbox run "<sandbox-id>" "python --version"
+prime sandbox delete "<sandbox-id>"
 
 # Inference
 prime inference models              # list available models
@@ -75,8 +82,10 @@ prime inference models              # list available models
 # Compute
 prime availability list             # GPU availability + pricing
 prime pods create                   # provision a pod
-prime pods ssh <pod-id>             # SSH in (needs: prime config set-ssh-key-path)
+prime pods ssh "<pod-id>"           # SSH in (needs: prime config set-ssh-key-path)
 ```
+
+These commands are identical in PowerShell and in POSIX shells. Quote angle-bracket placeholders (`"<sandbox-id>"`) as shown: PowerShell and `cmd.exe` both reject a bare `<`. In `cmd.exe`, turn each `#` comment into `REM`, and note that `&&` works there but fails in Windows PowerShell 5.1 — put each command on its own line instead.
 
 ## Working Conventions
 

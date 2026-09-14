@@ -14,7 +14,8 @@ async def run(path: str, old_str: str, new_str: str) -> str:
 
     Args:
         path: File to edit, relative to the working directory, absolute, or
-            `~`-prefixed (the leading `~`/`~user` is expanded to the home dir).
+            `~`-prefixed (a leading `~` expands to the user home directory on
+            every platform).
         old_str: Exact text to find. Must occur exactly once in the file.
         new_str: Replacement text.
 

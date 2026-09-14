@@ -6,33 +6,39 @@ Live docs: `sandboxes/overview.md`, `sandboxes/cli.md`, `sandboxes/sdk.md`, `san
 
 ## CLI Lifecycle
 
-```bash
+```powershell
 prime sandbox create python:3.11-slim --timeout-minutes 120   # any Docker image
 prime sandbox list
-prime sandbox run <sandbox-id> "python --version"
-prime sandbox get <sandbox-id>
-prime sandbox delete <sandbox-id>
+prime sandbox run "<sandbox-id>" "python --version"
+prime sandbox get "<sandbox-id>"
+prime sandbox delete "<sandbox-id>"
 ```
+
+Quote the placeholders: PowerShell treats a bare `<` as reserved syntax.
 
 Useful create flags:
 
-```bash
-prime sandbox create python:3.11-slim \
-  --name analytics-lab \
-  --cpu-cores 2 --memory-gb 4 --disk-size-gb 20 \
-  --timeout-minutes 240 \
-  --idle-timeout-minutes 15 \
-  --env APP_ENV=staging \
-  --secret API_KEY=sk-abc123 \
-  --start-command "python serve.py --port 8000" \
+```powershell
+prime sandbox create python:3.11-slim `
+  --name analytics-lab `
+  --cpu-cores 2 --memory-gb 4 --disk-size-gb 20 `
+  --timeout-minutes 240 `
+  --idle-timeout-minutes 15 `
+  --env APP_ENV=staging `
+  --secret API_KEY=sk-abc123 `
+  --start-command "python serve.py --port 8000" `
   --yes
 ```
+
+In PowerShell the backtick continues a line; on macOS and Linux use `\` instead.
 
 - `--timeout-minutes` caps total lifetime; `--idle-timeout-minutes` reaps the sandbox early when no exec/upload/download/file-read arrives (1 ≤ idle ≤ timeout ≤ 1440; not supported with `--vm`).
 - `--env` values are plain text; `--secret` values are encrypted at rest and obfuscated in output. Both become environment variables inside the container.
 - Default start command is `tail -f /dev/null` (idle, ready for `prime sandbox run`); `--start-command` replaces the image ENTRYPOINT.
 - Outbound internet is on by default; use `--no-network-access` for isolation when running untrusted code.
 - `--team-id` bills a team; `--yes` skips confirmation in automation.
+
+The sandbox itself is a Linux container, so container-internal paths and commands (`/workspace/data.csv`, `tail -f /dev/null`) stay POSIX. Only the host-side CLI commands on this page are shown in their Windows-native form.
 
 Custom images: build and push your own via Prime Images (`sandboxes/images.md`).
 

@@ -17,6 +17,10 @@ triple single-quoted variables (`old = '''...'''`) or build `old`/`new` from
 inspected file slices. Returns a short confirmation; raises if `old_str` is
 missing or matches more than once (widen the snippet to make it unique).
 
-Or from a shell cell:
+The same skill is also exposed as the console script `edit`, for shells whose
+`PATH` includes the kernel venv script directory (`<venv>\Scripts\edit.exe` on
+Windows, `<venv>/bin/edit` on macOS and Linux). The call is identical:
 
-    !edit --path pkg/file.py --old-str "..." --new-str "..."
+    edit --path pkg/file.py --old-str "..." --new-str "..."
+
+On Windows, run that line in PowerShell, not bash.

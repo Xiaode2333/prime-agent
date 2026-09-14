@@ -1,6 +1,6 @@
 # Python-Backed Skills
 
-A Python-backed skill is a regular markdown skill that also ships a Python package. Prime Agent installs the package editable into the kernel venv (`~/.prime/agent/kernel-venv` by default, `PRIME_AGENT_KERNEL_VENV` to override) and exposes it in the persistent Python kernel, so the agent can call it directly instead of shelling out.
+A Python-backed skill is a regular markdown skill that also ships a Python package. Prime Agent installs the package editable into the kernel venv (`~/.prime/agent/kernel-venv` by default, which is `%USERPROFILE%\.prime\agent\kernel-venv` on Windows; set `PRIME_AGENT_KERNEL_VENV` to override) and exposes it in the persistent Python kernel, so the agent can call it directly instead of shelling out.
 
 ## Detection Contract
 
@@ -37,10 +37,6 @@ description: Count word frequencies in text and return the most common words. Us
 Call directly from the kernel:
 
     await word_count("some text to analyze", top=3)
-
-Or from a shell cell:
-
-    !word_count "some text to analyze" --top 3
 ```
 
 **`pyproject.toml`**
@@ -106,9 +102,11 @@ The agent can then use either form:
 await word_count("prime agent", top=3)
 ```
 
-```bash
-!word_count "prime agent" --top 3
+```powershell
+word_count "prime agent" --top 3
 ```
+
+The console script is created inside the kernel venv and runs only where that environment is active. The script directory must be on `PATH`: `<venv>\Scripts\word_count.exe` on Windows, `<venv>/bin/word_count` on macOS and Linux. When the script is not on `PATH`, use the Python form above — it always works in the kernel.
 
 Omit `[project.scripts]` when a CLI is not needed.
 
@@ -126,8 +124,11 @@ A Python skill runs inside the agent's kernel, so it can itself spawn recursive 
 1. Check the contract: skill name maps to a valid identifier, `src/<import_name>/__init__.py` exists, hatchling wheel packages list matches.
 2. Test `run()` standalone from the skill directory, without the kernel:
 
-   ```bash
-   cd <skill-dir> && uv run python -c "import asyncio, word_count; print(asyncio.run(word_count.run('a b a', top=1)))"
+   ```powershell
+   Set-Location "<skill-dir>"
+   uv run python -c "import asyncio, word_count; print(asyncio.run(word_count.run('a b a', top=1)))"
    ```
+
+   On macOS and Linux the same two commands work; use `cd "<skill-dir>"` instead of `Set-Location`.
 
 3. In a fresh agent session (the kernel installs skills at startup), confirm `help(<import_name>)` shows the docstring and `await <import_name>(...)` works. If it raises `RuntimeError`, the message contains the underlying import error.

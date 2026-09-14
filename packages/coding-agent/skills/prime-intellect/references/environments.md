@@ -6,22 +6,24 @@ Live docs: `verifiers/overview.md`, `tutorials-environments/getting-started.md`,
 
 ## Discovering Environments (Hub)
 
-```bash
+```powershell
 prime env list --search "math" --owner primeintellect --show-actions
 prime env list --tag tools --tag sandbox
 prime env list --mine
 prime env list --starred
 prime env info owner/name        # metadata, version, dependencies
 prime env status owner/name      # CI/action status
-prime env pull owner/name -t ./tmp-env   # pull source for inspection
+prime env pull owner/name -t .\tmp-env   # pull source for inspection
 prime env install owner/name     # install locally
 ```
+
+`-t .\tmp-env` is a PowerShell relative path; on macOS and Linux use `-t ./tmp-env`.
 
 When picking candidates, prefer: `primeintellect`-owned, passing latest actions, updated within ~2 months, recent verifiers versions. Compare task type (single-turn, multi-turn, tool, sandbox, agent), reward type (binary, continuous, judge-based), and dependency/secret requirements.
 
 ## Creating Environments
 
-```bash
+```powershell
 prime env init my-env --v1       # scaffold (add --with-harness for an explicit reusable harness)
 prime env install my-env
 prime eval run my-env -m openai/gpt-4.1-mini -n 5   # smoke test immediately
@@ -39,7 +41,7 @@ Build guidance:
 
 `prime eval run` is the canonical eval path. Runs save automatically (visible in the Evaluations tab and `prime eval view`); do not add `--skip-upload` unless the user explicitly asks.
 
-```bash
+```powershell
 prime eval run my-env -m openai/gpt-4.1-mini -n 5               # smoke
 prime eval run owner/env -m openai/gpt-4.1-mini -n 200 -r 3 --shuffle -s   # scaled
 prime eval run owner/env --hosted --follow                       # hosted, streaming logs
@@ -54,7 +56,7 @@ prime eval run owner/env --hosted --follow                       # hosted, strea
 
 Default to Hosted Training unless the user explicitly wants self-managed infrastructure.
 
-```bash
+```powershell
 prime lab setup                  # Lab workspace for environments, evals, GEPA, Hosted Training
 prime train models               # supported models, capacity, pricing
 prime train init                 # generate a training config

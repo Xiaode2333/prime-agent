@@ -6,19 +6,21 @@ Live docs: `cli-reference/check-gpu-availability.md`, `cli-reference/provision-g
 
 ## GPU Availability
 
-```bash
+```powershell
 prime availability list                        # all GPUs with pricing
 prime availability list --gpu-type H100_80GB   # filter by GPU type
 ```
 
 ## Pods (single instances)
 
-```bash
+```powershell
 prime config set-ssh-key-path   # one-time: SSH key for pod access (generate on the dashboard profile page)
 prime pods create               # interactive provisioning from availability data
 prime pods list
-prime pods ssh <pod-id>
+prime pods ssh "<pod-id>"
 ```
+
+Quote the placeholder: PowerShell treats a bare `<` as reserved syntax.
 
 Pods support custom Docker images (`tutorials-on-demand-cloud/deploy-custom-docker-image.md`). Monitor, terminate, and inspect pods from the CLI or the dashboard.
 
@@ -38,7 +40,7 @@ Persistent disks outlive individual instances and can be attached to different i
 
 Manage team membership and run resources against team billing:
 
-```bash
+```powershell
 prime teams list
 ```
 

@@ -64,10 +64,12 @@ variables required, and it works even if you add the key mid-session.
 
 Optional overrides (environment variables):
 
-```bash
-export PRIME_AGENT_WEBSEARCH_TIMEOUT=45
-export PRIME_AGENT_WEBSEARCH_NUM_RESULTS=5
+```powershell
+$env:PRIME_AGENT_WEBSEARCH_TIMEOUT = 45
+$env:PRIME_AGENT_WEBSEARCH_NUM_RESULTS = 5
 ```
+
+On macOS and Linux use `export PRIME_AGENT_WEBSEARCH_TIMEOUT=45` and `export PRIME_AGENT_WEBSEARCH_NUM_RESULTS=5`.
 
 A `SERPER_API_KEY` in the environment, if set, takes precedence over the stored key.
 
@@ -191,12 +193,17 @@ async def run(query: str, limit: int = 5) -> str:
     ...
 ```
 
-The model can then call the skill from normal Python or from shell mode:
+The model can then call the skill from normal Python or from a shell:
 
 ```python
 await web_search("prime agent")
-!web_search "prime agent" --limit 3
 ```
+
+```powershell
+web_search "prime agent" --limit 3
+```
+
+The console script is created in the kernel venv (`Scripts\` on Windows, `bin` elsewhere), and that directory must be on `PATH` for the bare command name to resolve.
 
 ## Creating Skills with Prime Agent
 
@@ -234,7 +241,7 @@ An installed Python-backed skill is a real package on disk that adds executable 
 
 Skills register as `/skill:name` commands:
 
-```bash
+```text
 /skill:brave-search           # Load and execute the skill
 /skill:pdf-tools extract      # Load skill with arguments
 ```
@@ -257,7 +264,7 @@ A skill is a directory with a `SKILL.md` file. Everything else is freeform.
 my-skill/
 ├── SKILL.md              # Required: frontmatter + instructions
 ├── scripts/              # Helper scripts
-│   └── process.sh
+│   └── process.py
 ├── references/           # Detailed docs loaded on-demand
 │   └── api-reference.md
 └── assets/
@@ -277,16 +284,19 @@ description: What this skill does and when to use it. Be specific.
 ## Setup
 
 Run once before first use:
-```bash
-cd /path/to/skill && npm install
+```powershell
+Set-Location "C:\path\to\skill"
+npm install
 ```
 
 ## Usage
 
-```bash
-./scripts/process.sh <input>
+```powershell
+python scripts\process.py "<input>"
 ```
 ````
+
+On macOS and Linux, use `cd "path/to/skill"` instead of `Set-Location`, and run `python3 scripts/process.py "<input>"`.
 
 Use relative paths from the skill directory:
 
@@ -368,23 +378,26 @@ description: Web search and content extraction via Brave Search API. Use for sea
 
 ## Setup
 
-```bash
-cd /path/to/brave-search && npm install
+```powershell
+Set-Location "C:\path\to\brave-search"
+npm install
 ```
 
 ## Search
 
-```bash
-./search.js "query"              # Basic search
-./search.js "query" --content    # Include page content
+```powershell
+node .\search.js "query"              # Basic search
+node .\search.js "query" --content    # Include page content
 ```
 
 ## Extract Page Content
 
-```bash
-./content.js https://example.com
+```powershell
+node .\content.js https://example.com
 ```
 ````
+
+On macOS and Linux, use `cd "path/to/brave-search"` instead of `Set-Location`; `node ./search.js "query"` works there without relying on the executable bit.
 
 ## Skill Repositories
 

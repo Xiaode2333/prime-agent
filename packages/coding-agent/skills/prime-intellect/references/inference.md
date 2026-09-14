@@ -9,13 +9,15 @@ Live docs: `inference/overview.md`, `inference/usage.md`, `inference/adapter-dep
 1. Create an API key on https://app.primeintellect.ai (account settings → API Keys) with the **Inference** permission enabled — without it, requests fail with authentication errors.
 2. Export it:
 
-```bash
-export PRIME_API_KEY="your-api-key-here"
+```powershell
+$env:PRIME_API_KEY = "your-api-key-here"
 ```
+
+`$env:` applies to the current shell session only; `setx PRIME_API_KEY "your-api-key-here"` persists it for new shells. On macOS and Linux the equivalent is `export PRIME_API_KEY="your-api-key-here"`.
 
 ## Via the CLI (recommended for evaluations)
 
-```bash
+```powershell
 prime inference models                                   # list available models
 prime eval run gsm8k -m meta-llama/llama-3.1-70b-instruct -n 25   # evals route through Prime Inference
 ```

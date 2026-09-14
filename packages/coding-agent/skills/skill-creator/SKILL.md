@@ -21,6 +21,8 @@ Before writing a Python-backed skill, read [references/python-skills.md](referen
    - Project skill, shared via the repo: `.prime/agent/skills/<name>/`
    - Personal global skill: `~/.prime/agent/skills/<name>/`
    - Shipped with an npm package: a `skills/` directory in the package, or `pi.skills` paths in its `package.json`
+
+   `~` is the home directory on every platform and PowerShell expands it in paths, so both spellings work on Windows; the explicit form there is `$env:USERPROFILE\.prime\agent\skills\<name>\`.
 3. **Scaffold and write** the directory using the layout and frontmatter rules below.
 4. **Verify** the skill loads (see Verification).
 
