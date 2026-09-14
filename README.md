@@ -59,6 +59,14 @@ Install the latest stable release on macOS or Linux:
 curl --proto '=https' --proto-redir '=https' -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
+Install on Windows from PowerShell:
+
+```powershell
+irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
+```
+
+The Windows installer needs Node.js 22.8.0 or newer and [Git for Windows](https://git-scm.com/download/win) for the agent's bash shell. See [Windows setup](packages/coding-agent/docs/windows.md).
+
 The installer requires HTTPS for release downloads, checks the selected archive against the release origin's SHA-256 inventory, installs the `prime-agent` command, and can prepare the Python runtime used by the agent. The checksum detects corruption or an inconsistent transfer; because the inventory and archive come from the same origin, HTTPS is the authenticity boundary.
 
 Start Prime Agent from the repository or directory you want it to work in:

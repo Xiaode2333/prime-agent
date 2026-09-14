@@ -434,6 +434,19 @@ jobs:
             .replaceAll("__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__", channel);
           fs.writeFileSync("/tmp/prime-agent-install.sh", renderInstaller("stable"));
           fs.writeFileSync("/tmp/prime-agent-install-beta.sh", renderInstaller("beta"));
+
+          // The Windows installer carries the public base URL directly and selects
+          // the channel through its -Channel default, so only that default is rendered.
+          const windowsInstaller = fs.readFileSync("install.ps1", "utf8");
+          const betaWindowsInstaller = windowsInstaller.replace(
+            '[string]$Channel = "stable"',
+            '[string]$Channel = "beta"',
+          );
+          if (betaWindowsInstaller === windowsInstaller) {
+            throw new Error("install.ps1 beta render did not change the default channel");
+          }
+          fs.writeFileSync("/tmp/prime-agent-install.ps1", windowsInstaller);
+          fs.writeFileSync("/tmp/prime-agent-install-beta.ps1", betaWindowsInstaller);
           NODE
 
       - name: Extract production release notes
@@ -489,6 +502,16 @@ jobs:
           aws s3 cp /tmp/prime-agent-install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
             --endpoint-url "$R2_ENDPOINT_URL" \
             --content-type text/x-shellscript \
+            --cache-control no-cache
+
+          aws s3 cp /tmp/prime-agent-install.ps1 "s3://${R2_BUCKET}/install.ps1" \
+            --endpoint-url "$R2_ENDPOINT_URL" \
+            --content-type text/plain \
+            --cache-control no-cache
+
+          aws s3 cp /tmp/prime-agent-install-beta.ps1 "s3://${R2_BUCKET}/install-beta.ps1" \
+            --endpoint-url "$R2_ENDPOINT_URL" \
+            --content-type text/plain \
             --cache-control no-cache
 
       - name: Create production GitHub release

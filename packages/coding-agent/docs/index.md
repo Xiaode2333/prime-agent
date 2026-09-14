@@ -10,6 +10,14 @@ Install the latest stable release on Linux or macOS:
 curl --proto '=https' --proto-redir '=https' -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
+On Windows, install from PowerShell:
+
+```powershell
+irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
+```
+
+See [Windows setup](windows.md) for requirements and installer options.
+
 Then run it in a project directory:
 
 ```bash
@@ -24,6 +32,7 @@ Public releases are currently installed from versioned release artifacts. The in
 ## Start Here
 
 - [Quickstart](quickstart.md) - install, authenticate, and run a first session.
+- [Windows setup](windows.md) - install and run on native Windows.
 - [Using Prime Agent](usage.md) - interactive mode, RLM subagents, slash commands, context files, and CLI reference.
 - [Architecture overview](architecture.md) - client, daemon, worker, session, kernel, provider, and storage boundaries.
 - [RLM programming model](rlm.md) - programmatic execution, native subagents, Python skills, and durable state.

@@ -1,9 +1,13 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { buildBatchShimInvocation, windowsExecutableCandidates } from "../src/core/kernel/bootstrap.js";
+import {
+	buildBatchShimInvocation,
+	uvInstallInvocation,
+	windowsExecutableCandidates,
+} from "../src/core/kernel/bootstrap.js";
 
 let tempDir = "";
 
@@ -39,6 +43,15 @@ describe("buildBatchShimInvocation", () => {
 	it.each(['a"b', "line\nbreak", "line\rbreak", "null\0byte"])("rejects unsafe command or argument %j", (value) => {
 		expect(() => buildBatchShimInvocation("uv.cmd", [value], {}, "testtoken")).toThrow(/cannot contain/);
 		expect(() => buildBatchShimInvocation(value, [], {}, "testtoken")).toThrow(/cannot contain/);
+	});
+
+	it("passes empty arguments as a literal empty quoted pair", () => {
+		const invocation = buildBatchShimInvocation("shim.cmd", ["a", "", "b"], { PATH: "original" }, "testtoken");
+		// values[0] is the shim path, so the empty argument is values[2].
+		expect(invocation.args[4]).toBe(
+			'""%PRIME_AGENT_BATCH_testtoken_0%" "%PRIME_AGENT_BATCH_testtoken_1%" "" "%PRIME_AGENT_BATCH_testtoken_3%""',
+		);
+		expect(invocation.env.PRIME_AGENT_BATCH_testtoken_2).toBeUndefined();
 	});
 
 	it("rejects tokens that could alter the cmd.exe command string", () => {
@@ -143,5 +156,42 @@ describe("windowsExecutableCandidates", () => {
 
 	it("ignores PATHEXT entries that CreateProcess cannot execute", () => {
 		expect(windowsExecutableCandidates("uv", ".JS;.EXE;.VBS;.CMD")).toEqual(["uv", "uv.exe", "uv.cmd"]);
+	});
+});
+
+describe("uvInstallInvocation", () => {
+	it("uses the POSIX installer pipeline on macOS and Linux", () => {
+		for (const platform of ["darwin", "linux"] as const) {
+			const invocation = uvInstallInvocation(platform);
+			expect(invocation.command).toBe("sh");
+			expect(invocation.args).toEqual(["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"]);
+			expect(invocation.display).toBe("curl -LsSf https://astral.sh/uv/install.sh | sh");
+		}
+	});
+
+	it("never spawns a POSIX shell on win32", () => {
+		const invocation = uvInstallInvocation("win32", "C:\\Windows");
+		expect(win32.basename(invocation.command).toLowerCase()).toBe("powershell.exe");
+		expect(invocation.args).not.toContain("-c");
+		expect(invocation.args.join(" ")).not.toContain("install.sh");
+	});
+
+	it("drives the bundled Windows PowerShell with the uv PowerShell installer", () => {
+		const invocation = uvInstallInvocation("win32", "C:\\Windows");
+		expect(invocation.command).toBe("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+		expect(invocation.args).toEqual([
+			"-NoProfile",
+			"-NonInteractive",
+			"-ExecutionPolicy",
+			"Bypass",
+			"-Command",
+			"irm https://astral.sh/uv/install.ps1 | iex",
+		]);
+		expect(invocation.display).toContain("install.ps1");
+	});
+
+	it("falls back to the standard Windows directory when SystemRoot is unset", () => {
+		const invocation = uvInstallInvocation("win32", undefined);
+		expect(invocation.command).toBe("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
 	});
 });

@@ -1,5 +1,67 @@
 # Windows Setup
 
+Prime Agent installs and runs on native Windows. WSL is not required.
+
+Windows uses the npm release tarball route. Standalone Windows binaries are not published yet, so the compiled-install path used on macOS and Linux does not apply.
+
+## Requirements
+
+- Windows 10 1809 or Windows 11, x64.
+- Node.js 22.8.0 or newer. `winget install --id OpenJS.NodeJS.LTS -e` installs a suitable build.
+- [Git for Windows](https://git-scm.com/download/win), which provides the `bash.exe` that the agent's `bash()` tool needs.
+
+Node.js ships `npm`, so no separate package manager setup is required.
+
+## Install
+
+From PowerShell:
+
+```powershell
+irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
+```
+
+From a checkout:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Installer options:
+
+| Option | Effect |
+| --- | --- |
+| `-Channel beta` | Install the beta channel instead of stable. |
+| `-Version 0.9.4` | Install a specific version. |
+| `-BaseUrl <url>` | Use another release base URL. |
+| `-NpmPrefix <dir>` | Install into a specific npm global prefix. |
+| `-SkipKernel` | Skip install-time Python kernel preparation. |
+| `-SkipUv` | Do not install uv; pair this with `PRIME_AGENT_KERNEL_PYTHON`. |
+| `-SkipPath` | Do not change the user `PATH`. |
+
+The installer:
+
+1. Checks that Node.js is 22.8.0 or newer and locates `npm`.
+2. Resolves the release version from the selected channel.
+3. Downloads `prime-agent-<version>.tgz` and verifies its SHA-256 against the release manifest.
+4. Installs the tarball globally with `npm install -g`.
+5. Installs [uv](https://docs.astral.sh/uv/) when it is missing, because the Python kernel needs it once.
+6. Adds the npm global prefix to the user `PATH` when it is absent.
+
+Open a new terminal after the install so the updated `PATH` applies.
+
+## First Run
+
+```powershell
+cd C:\path\to\project
+prime-agent
+```
+
+Run `/login` on first launch to choose a subscription or API-key provider, or set an environment variable such as `ANTHROPIC_API_KEY` before launch.
+
+The first launch prepares the Python kernel. This takes about 30 seconds and needs network access; later launches are offline.
+
+## Bash Shell
+
 Prime Agent requires a bash shell on Windows. Checked locations (in order):
 
 1. Custom path from `~/.prime/agent/settings.json`
@@ -8,6 +70,8 @@ Prime Agent requires a bash shell on Windows. Checked locations (in order):
 
 For most users, [Git for Windows](https://git-scm.com/download/win) is sufficient.
 
+`C:\Windows\System32\bash.exe` is the WSL launcher, so it starts a Linux-side shell rather than a Windows one. Prime Agent orders it last among PATH matches.
+
 ## Custom Shell Path
 
 ```json
@@ -15,3 +79,18 @@ For most users, [Git for Windows](https://git-scm.com/download/win) is sufficien
   "shellPath": "C:\\cygwin64\\bin\\bash.exe"
 }
 ```
+
+## Troubleshooting
+
+- `prime-agent` is not recognized after install: open a new terminal, or run `$env:Path = "$env:APPDATA\npm;$env:Path"` for the current session.
+- The kernel reports that uv is missing: install it with `powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"`, or set `PRIME_AGENT_KERNEL_PYTHON` to an interpreter that already has `prime-agent-runtime` installed.
+- `npm install` fails with `EBUSY` or a locked `*.node` file: antivirus or a file handle held the freshly written native module. The installer retries this class of failure automatically; a manual retry also succeeds.
+- Background service problems: `prime-agent doctor` inspects state, and `prime-agent doctor --fix` repairs it.
+
+## Uninstall
+
+```powershell
+npm uninstall -g prime-agent
+```
+
+The Python kernel virtual environment and configuration live under `%USERPROFILE%\.prime\agent`. uv installs to `%USERPROFILE%\.local\bin`.

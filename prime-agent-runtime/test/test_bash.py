@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import resource
 import signal
 import socket
 import subprocess
@@ -15,6 +14,11 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from types import FunctionType, SimpleNamespace
 from unittest import mock
+
+try:
+    import resource
+except ImportError:  # Windows has no resource module; RLIMIT tests are POSIX-only.
+    resource = None
 
 from rlm import bash
 
@@ -302,6 +306,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             result = await asyncio.wait_for(handle, timeout=5)
         self.assertEqual(result.exit_code, 0)
 
+    @unittest.skipIf(resource is None, "resource module is POSIX-only")
     async def test_status_survives_pipe_fds_above_fd_setsize(self):
         # select.select() rejects fds >= FD_SETSIZE (1024); the delivered status
         # must still win when the status/wake pipes land above that boundary.
