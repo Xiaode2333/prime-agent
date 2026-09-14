@@ -40,6 +40,16 @@ _STATUS_FD = 9
 _OUTPUT_FD = 8
 _COMPLETION_PREFIX = b"\x1eprime-agent-complete:"
 _COMPLETION_SUFFIX = b"\x1f"
+# Windows status channel: the POSIX child writes its status on a private fd
+# (_STATUS_FD); a PowerShell/cmd child has no such fd, so its wrapper prints the
+# completion marker and the status on one ASCII line of stdout instead. ASCII
+# survives every code page PowerShell or cmd.exe can emit; a non-ASCII command
+# would have to forge a 64-hex token it can only read from the script text.
+_WIN_COMPLETION_PREFIX = b"prime-agent-complete:"
+# Shell families that get the wrapper status channel on Windows (see _shell_kind).
+_WIN_STATUS_KINDS = ("powershell", "cmd")
+# Shell death must not wait for a capture pipe a detached grandchild still holds.
+_WIN_STATUS_GRACE = 0.5
 # Cancelled one-shot awaits: TERM grace before the group KILL, then the bounded
 # wait for a confirmed group exit before CancelledError propagates.
 _CANCEL_TERM_GRACE = 0.5
@@ -248,6 +258,8 @@ class BashHandle:
         self._completion_output: str | None = None
         self._completion_lock = threading.Lock()
         self._completion_pending = b""
+        # Windows status channel: bytes of the wrapper status line not yet parsed.
+        self._status_pending = b""
         self._status: int | None = None
         self._status_known = threading.Event()
         self._reaped = False
@@ -269,7 +281,12 @@ class BashHandle:
         self._pump_transfer = False
         self._job: int | None = None
         self._completion_marker: bytes | None = None
+        # True when the child wrapper carries the marker+status channel on stdout
+        # (Windows powershell/cmd); False on POSIX (private status fd) and for a
+        # POSIX shell override on Windows (no fd channel, exit-code status).
+        self._stream_status = False
         status_write = -1
+        shell = _shell()
         if _IS_POSIX:
             # Full-duplex status channel: the child end rides in as stdin (fd 0)
             # and the script remaps it to _STATUS_FD before swapping in /dev/null
@@ -297,18 +314,20 @@ class BashHandle:
                 completion_token[:token_midpoint],
                 completion_token[token_midpoint:],
             )
+            argv = [shell, "-c", script]
         else:
-            # Windows lacks a foreground-status channel, so its exit drain stays best-effort.
-            script = _with_prefix(command)
             self._job = _winjob.create_job()
             if self._job is None:
                 # Nothing spawned yet, so nothing can leak: refuse to start.
                 raise RuntimeError("bash(): Windows job containment could not be established")
+            argv, self._stream_status, self._completion_marker = _windows_shell_argv(
+                shell, _with_prefix(command)
+            )
         try:
             self._proc: subprocess.Popen[bytes] | _winjob.JobProcess
             if _IS_POSIX:
                 self._proc = subprocess.Popen(
-                    [_shell(), "-c", script],
+                    argv,
                     cwd=os.getcwd(),
                     env=_child_env(),
                     stdout=subprocess.PIPE,
@@ -318,7 +337,7 @@ class BashHandle:
                 )
             else:
                 self._proc = _winjob.spawn_in_job(
-                    self._job, [_shell(), "-c", script], cwd=os.getcwd(), env=_child_env()
+                    self._job, argv, cwd=os.getcwd(), env=_child_env()
                 )
         except BaseException:
             for fd in (self._status_read, self._wake_read, self._wake_write):
@@ -426,9 +445,21 @@ class BashHandle:
         if not _IS_POSIX:
             try:
                 while chunk := stdout.read1(_READ_CHUNK):
-                    self._buffer.write(chunk)
+                    if self._stream_status:
+                        # The wrapper fence rides on the captured stream (no fd-8
+                        # duplicate exists on Windows), so it must be recognised
+                        # here: it carries the status and marks where foreground
+                        # output ends.
+                        self._consume_output(chunk)
+                    else:
+                        self._buffer.write(chunk)
             except (OSError, ValueError):
                 pass
+            self._abandon_completion()
+            if self._stream_status:
+                # EOF is the last status boundary: a wrapper killed before its
+                # marker leaves the status to _watch, but _report must stop waiting.
+                self._status_known.set()
             stdout.close()
             self._eof.set()
             return
@@ -456,6 +487,9 @@ class BashHandle:
         self._eof.set()
 
     def _consume_output(self, chunk: bytes) -> None:
+        if self._stream_status:
+            self._consume_stream_status(chunk)
+            return
         marker = self._completion_marker
         assert marker is not None
         with self._completion_lock:
@@ -478,6 +512,51 @@ class BashHandle:
                     break
             self._buffer.write(data[:-retained] if retained else data)
             self._completion_pending = data[-retained:] if retained else b""
+
+    def _consume_stream_status(self, chunk: bytes) -> None:
+        """Windows status channel: the wrapper writes "<marker> <status>" as one
+        ASCII line on stdout, so the fence and the status arrive together."""
+        marker = self._completion_marker
+        assert marker is not None
+        with self._completion_lock:
+            if self._completion_terminal.is_set():
+                tail = chunk
+            else:
+                data = self._completion_pending + chunk
+                marker_at = data.find(marker)
+                if marker_at < 0:
+                    retained = 0
+                    for size in range(min(len(data), len(marker) - 1), 0, -1):
+                        if data.endswith(marker[:size]):
+                            retained = size
+                            break
+                    self._buffer.write(data[:-retained] if retained else data)
+                    self._completion_pending = data[-retained:] if retained else b""
+                    return
+                self._buffer.write(data[:marker_at])
+                self._completion_pending = b""
+                self._completion_output = self._buffer.text()
+                self._completion_terminal.set()
+                tail = data[marker_at + len(marker) :]
+            self._consume_stream_status_tail(tail)
+
+    def _consume_stream_status_tail(self, tail: bytes) -> None:
+        # Caller holds _completion_lock. Everything up to the end of the status
+        # line is protocol; later bytes (background output after the fence) are
+        # user output and go to the buffer.
+        if self._status_known.is_set():
+            self._buffer.write(tail)
+            return
+        data = self._status_pending + tail
+        newline = data.find(b"\n")
+        if newline < 0:
+            self._status_pending = data
+            return
+        self._status_pending = b""
+        with self._callback_lock:
+            self._status = _parse_stream_status(data[:newline])
+        self._status_known.set()
+        self._buffer.write(data[newline + 1 :])
 
     def _abandon_completion(self) -> None:
         with self._completion_lock:
@@ -517,6 +596,8 @@ class BashHandle:
         # `exit`/`exec`/`set -e`/fatal signal skips `printf`, and background
         # children can hold the socket open past the shell's lifetime.
         exit_code = self._proc.wait()
+        if self._stream_status:
+            self._release_stream_status()
         if self._wake_write >= 0:
             # Unblock _read_status: background children can hold the status socket
             # open past the shell's lifetime via bash's saved-fd duplicate.
@@ -549,6 +630,18 @@ class BashHandle:
         with _live_lock:
             _live_handles.discard(self)
 
+    def _release_stream_status(self) -> None:
+        # Windows wake equivalent: a detached grandchild can hold the capture pipe
+        # open past the shell's lifetime, so EOF alone cannot end the status wait.
+        # A bounded drain keeps the pump's chance to publish a marker already in
+        # the pipe (the shell wrote it before exiting) before the exit code wins.
+        deadline = time.monotonic() + _WIN_STATUS_GRACE
+        while not (self._status_known.is_set() or self._eof.is_set()):
+            if time.monotonic() >= deadline:
+                break
+            self._eof.wait(0.02)
+        self._status_known.set()
+
     def _reap_group(self) -> bool:
         # Group liveness, not leader death, gates the inactive record: members
         # that outlive the leader would leak behind a stale journal anchor.
@@ -572,7 +665,13 @@ class BashHandle:
 
     def _read_status(self) -> int | None:
         if self._status_read < 0:
-            return None
+            if not self._stream_status:
+                return None
+            # Windows status channel: the pump publishes the wrapper's status when
+            # the marker line arrives (or at EOF); _watch releases this wait when
+            # the shell dies without either, so it cannot hang.
+            self._status_known.wait()
+            return self._status
         try:
             # DefaultSelector (kqueue/epoll) instead of select(): select() rejects
             # fds >= FD_SETSIZE (1024) even when the process fd limit is higher.

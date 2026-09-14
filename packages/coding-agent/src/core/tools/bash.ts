@@ -23,6 +23,15 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult
 /** The shell the bash tool drives on this platform. */
 const SHELL_LABEL = process.platform === "win32" ? "PowerShell" : "bash";
 
+/**
+ * Windows PowerShell 5.1 syntax differs from bash in ways that silently break
+ * model-written commands, so state the differences next to the tool.
+ */
+const WINDOWS_SHELL_NOTES =
+	process.platform === "win32"
+		? " Commands run in Windows PowerShell 5.1: chain commands with ';' and not '&&', set variables with $env:NAME='value' and not NAME=value, and use Get-ChildItem/Select-String/Get-Content rather than ls/grep/cat. A native command's exit code is reported, and a failed cmdlet reports exit code 1."
+		: "";
+
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Shell command to execute" }),
 	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
@@ -653,7 +662,7 @@ export function createBashToolDefinition(
 	const definition: ToolDefinition<typeof bashSchema, BashToolDetails | undefined, BashRenderState> = {
 		name: "bash",
 		label: "bash",
-		description: `Execute a ${SHELL_LABEL} command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds. Destructive git discard commands (git checkout -- ., git checkout ., git clean -f..., git reset --hard, git restore .) are refused while uncommitted changes exist; retry with allowDestructiveGit: true only when the discard is intentional.`,
+		description: `Execute a ${SHELL_LABEL} command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds. Destructive git discard commands (git checkout -- ., git checkout ., git clean -f..., git reset --hard, git restore .) are refused while uncommitted changes exist; retry with allowDestructiveGit: true only when the discard is intentional.${WINDOWS_SHELL_NOTES}`,
 		promptSnippet:
 			process.platform === "win32"
 				? "Execute PowerShell commands (Get-ChildItem, Select-String, etc.)"
