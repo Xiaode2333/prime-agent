@@ -1,5 +1,4 @@
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { delimiter, win32 } from "node:path";
 import { getBinDir } from "../config.js";
 import { recordOrphanProcessState } from "../core/orphan-process-journal.js";
@@ -148,39 +147,16 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 	return { shell: "sh", args: ["-c"] };
 }
 
-// Literal Program Files roots: the env vars of the same name are ambient
-// attacker-influenceable input, the same trust-laundering class as PATH.
-const PROGRAM_FILES_ROOT = "C:\\Program Files";
-const PROGRAM_FILES_X86_ROOT = "C:\\Program Files (x86)";
-
-/**
- * Git for Windows install roots, including the per-user root that a non-elevated
- * install uses. Derived from the home directory and the two literal Program Files
- * roots, never from PATH.
- */
-export function windowsGitBashCandidates(
-	homeDirectory: string,
-	programFiles: string | undefined,
-	programFilesX86: string | undefined,
-): string[] {
-	const candidates: string[] = [];
-	if (programFiles) {
-		candidates.push(win32.join(programFiles, "Git", "bin", "bash.exe"));
-	}
-	if (programFilesX86) {
-		candidates.push(win32.join(programFilesX86, "Git", "bin", "bash.exe"));
-	}
-	candidates.push(win32.join(homeDirectory, "AppData", "Local", "Programs", "Git", "bin", "bash.exe"));
-	return candidates;
-}
-
 /**
  * Absolute default shell for the kernel's bash(): explicit shellPath wins; POSIX
  * uses /bin/bash else /bin/sh (absolute, never PATH — the kernel inherits a
- * user-influenced PATH); win32 uses only the literal Git Bash roots plus the
- * per-user root under the home directory, never PATH (a repo-controlled
- * PATH/where.exe must not pick the kernel shell).
- * undefined = no shell found: kernel startup must not fail, bash() raises its
+ * user-influenced PATH); win32 uses the same shipped shell as the shell tool, so
+ * the tool and the kernel agree on what a command means.
+ *
+ * Git Bash is never selected implicitly: set shellPath to use it. Literal
+ * candidates only, never PATH, because a repo-controlled PATH/where.exe must not
+ * pick the kernel shell.
+ * undefined = no shell found: kernel startup must not fail and bash() raises its
  * teaching error.
  */
 export function resolveKernelBashShell(customShellPath?: string): string | undefined {
@@ -191,12 +167,13 @@ export function resolveKernelBashShell(customShellPath?: string): string | undef
 	if (process.platform !== "win32") {
 		return existsSync("/bin/bash") ? "/bin/bash" : "/bin/sh";
 	}
-	for (const path of windowsGitBashCandidates(homedir(), PROGRAM_FILES_ROOT, PROGRAM_FILES_X86_ROOT)) {
-		if (existsSync(path)) {
-			return path;
+	for (const candidate of windowsShellCandidates()) {
+		if (existsSync(candidate)) {
+			return candidate;
 		}
 	}
-	return undefined;
+	const comSpec = process.env.ComSpec?.trim();
+	return comSpec && existsSync(comSpec) ? comSpec : undefined;
 }
 
 export function getShellEnv(): NodeJS.ProcessEnv {

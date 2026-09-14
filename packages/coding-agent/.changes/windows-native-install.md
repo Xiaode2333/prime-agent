@@ -8,3 +8,4 @@
 - Fixed the direct worker transport on Windows: `getDaemonSocketIdentity` returned `undefined` for named pipes, so every `get_direct_worker_transport` request failed and an interactive session could not attach.
 - Hardened `%USERPROFILE%\.prime` with a Windows ACL (`icacls` inheritance removal plus an owner-only grant) because mode bits are not access control on Windows.
 - Converted the bundled skills and skill docs from bash to PowerShell/Python examples.
+- The kernel's `bash()` also runs without a POSIX shell on Windows: it resolves Windows PowerShell then cmd.exe (never PATH), takes its status from a wrapper line instead of the POSIX status fd, and reports the command's own exit code; the resolving host now selects the same shipped shell for the kernel and the shell tool, so Git Bash is used only when `shellPath` names it.

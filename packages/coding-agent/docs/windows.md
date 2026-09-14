@@ -93,9 +93,11 @@ Git Bash remains available through the same setting if you install it and prefer
 }
 ```
 
-The Python kernel's `bash()` runs inside the REPL and currently needs a POSIX shell
-for its status protocol. Set `shellPath` to Git Bash if you use `bash()` from the
-kernel, or stay on `ipython` cells, which need no shell.
+The Python kernel's `bash()` uses the same resolution order as the shell tool, so
+`bash()` inside the REPL also runs on Windows PowerShell with no POSIX shell
+installed. It reports the command's own exit code and keeps the same handle API
+(`poll`, `tail`, `output`, `kill`). Git Bash is used only when `shellPath` points
+at it, and then the kernel keeps the POSIX behaviour.
 
 ## Troubleshooting
 

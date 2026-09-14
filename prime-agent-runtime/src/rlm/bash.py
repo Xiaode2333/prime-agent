@@ -6,6 +6,7 @@ import asyncio
 import atexit
 import functools
 import json
+import locale
 import os
 import secrets
 import selectors
@@ -15,6 +16,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -260,6 +262,7 @@ class BashHandle:
         self._completion_pending = b""
         # Windows status channel: bytes of the wrapper status line not yet parsed.
         self._status_pending = b""
+        self._stream_status_line_seen = False
         self._status: int | None = None
         self._status_known = threading.Event()
         self._reaped = False
@@ -285,6 +288,8 @@ class BashHandle:
         # (Windows powershell/cmd); False on POSIX (private status fd) and for a
         # POSIX shell override on Windows (no fd channel, exit-code status).
         self._stream_status = False
+        # Temp dir holding a cmd.exe wrapper batch file (Windows cmd path only).
+        self._cleanup_dir: str | None = None
         status_write = -1
         shell = _shell()
         if _IS_POSIX:
@@ -320,9 +325,11 @@ class BashHandle:
             if self._job is None:
                 # Nothing spawned yet, so nothing can leak: refuse to start.
                 raise RuntimeError("bash(): Windows job containment could not be established")
-            argv, self._stream_status, self._completion_marker = _windows_shell_argv(
-                shell, _with_prefix(command)
-            )
+            plan = _windows_shell_command(shell, _with_prefix(command))
+            argv = plan.argv
+            self._stream_status = plan.stream_status
+            self._completion_marker = plan.marker
+            self._cleanup_dir = plan.cleanup
         try:
             self._proc: subprocess.Popen[bytes] | _winjob.JobProcess
             if _IS_POSIX:
@@ -343,6 +350,7 @@ class BashHandle:
             for fd in (self._status_read, self._wake_read, self._wake_write):
                 if fd >= 0:
                     os.close(fd)
+            self._remove_wrapper()
             if self._job is not None:
                 job, self._job = self._job, None
                 _winjob.close(job)
@@ -541,10 +549,12 @@ class BashHandle:
             self._consume_stream_status_tail(tail)
 
     def _consume_stream_status_tail(self, tail: bytes) -> None:
-        # Caller holds _completion_lock. Everything up to the end of the status
-        # line is protocol; later bytes (background output after the fence) are
-        # user output and go to the buffer.
-        if self._status_known.is_set():
+        # Caller holds _completion_lock. Everything up to the end of the first
+        # line after the fence is protocol; later bytes (background output after
+        # the fence) are user output and go to the buffer. The line is consumed
+        # even when the wait was already released, so protocol bytes never leak
+        # into the result.
+        if self._stream_status_line_seen:
             self._buffer.write(tail)
             return
         data = self._status_pending + tail
@@ -553,6 +563,7 @@ class BashHandle:
             self._status_pending = data
             return
         self._status_pending = b""
+        self._stream_status_line_seen = True
         with self._callback_lock:
             self._status = _parse_stream_status(data[:newline])
         self._status_known.set()
@@ -621,6 +632,7 @@ class BashHandle:
             if not _IS_POSIX:
                 # Reaped: pid fallbacks are gone, so the handle may finally close.
                 cast("_winjob.JobProcess", self._proc).close()
+        self._remove_wrapper()
         with self._callback_lock:
             callback, self._reap_callback = self._reap_callback, None
         if callback is not None:
@@ -629,6 +641,14 @@ class BashHandle:
             _record_journal(self._pid, active=False)
         with _live_lock:
             _live_handles.discard(self)
+
+    def _remove_wrapper(self) -> None:
+        # Only the cmd.exe path writes anything: the batch file is removed as soon
+        # as the handle is reaped (or the spawn aborted); a kernel crash leaves it
+        # in the private temp dir for the OS to clean.
+        directory, self._cleanup_dir = self._cleanup_dir, None
+        if directory is not None:
+            shutil.rmtree(directory, ignore_errors=True)
 
     def _release_stream_status(self) -> None:
         # Windows wake equivalent: a detached grandchild can hold the capture pipe
@@ -1000,6 +1020,7 @@ class BashHandle:
             if not _IS_POSIX:
                 # Reaped commits before close: later lock holders skip raw-pid fallbacks.
                 cast("_winjob.JobProcess", self._proc).close()
+        self._remove_wrapper()
         with _live_lock:
             _live_handles.discard(self)
         if delivered:
@@ -1050,6 +1071,15 @@ def bash(command: str) -> BashHandle:
     Output written after the completion fence (e.g. by an EXIT trap or a
     background job) is not in BashResult.output but stays visible via
     handle.output()/tail().
+
+    The command runs through PRIME_AGENT_BASH_SHELL, or on Windows -- where no
+    POSIX shell is required -- through Windows PowerShell, then cmd.exe
+    (System32, never PATH). POSIX shells keep the fd-9 status channel; the
+    Windows shells take the status from a wrapper line the child prints on
+    stdout, so the exit code is the command's own (PowerShell would otherwise
+    collapse every failing native command to 1). `&` keeps the meaning of the
+    chosen shell: POSIX backgrounding, cmd.exe command separation, PowerShell
+    the call operator.
     """
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
@@ -1065,17 +1095,168 @@ def _shell() -> str:
             raise ValueError("PRIME_AGENT_BASH_SHELL must be an absolute path")
         return override
     if not _IS_POSIX:
-        # Never consult PATH on Windows: a repo-controlled PATH could supply
-        # the shell. The host injects PRIME_AGENT_BASH_SHELL when one exists.
+        # No POSIX shell installed: fall back to the shells every supported
+        # Windows ships (Windows PowerShell 5.1, then cmd.exe). Never consult
+        # PATH: a repo-controlled PATH could supply the shell.
+        for candidate in _windows_shell_candidates():
+            if os.path.exists(candidate):
+                return candidate
         raise RuntimeError(
-            "bash() needs PRIME_AGENT_BASH_SHELL set to the absolute path of a "
-            "POSIX shell on Windows (e.g. install Git Bash in its default "
-            "location so the host injects it)"
+            "bash() found no shell: PRIME_AGENT_BASH_SHELL is unset and neither "
+            "Windows PowerShell nor cmd.exe exists under "
+            + os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
         )
     # PATH fallback only serves bare/standalone POSIX runtime use: the host
     # always injects PRIME_AGENT_BASH_SHELL (an absolute path) when a shell exists.
     shell = shutil.which("bash")
     return shell or "/bin/sh"
+
+
+def _windows_shell_candidates() -> tuple[str, str]:
+    """Absolute fallback shells, mirroring the coding-agent shell tool: Windows
+    PowerShell is present on every supported Windows version, cmd.exe (System32,
+    never ComSpec, which ambient env could redirect) is the second choice."""
+    return (_system32("WindowsPowerShell", "v1.0", "powershell.exe"), _system32("cmd.exe"))
+
+
+def _shell_kind(shell: str) -> str:
+    """Classify a shell by executable name: "posix", "powershell" or "cmd".
+
+    Mirrors classifyShell in packages/coding-agent/src/utils/shell.ts:65-74 so the
+    kernel invokes a shell the same way the coding-agent shell tool does.
+    """
+    name = os.path.basename(shell).lower()
+    if name in ("powershell.exe", "powershell", "pwsh.exe", "pwsh"):
+        return "powershell"
+    if name in ("cmd.exe", "cmd"):
+        return "cmd"
+    return "posix"
+
+
+@dataclass(frozen=True)
+class _WindowsCommand:
+    """How a Windows handle runs one command, plus the temp dir to remove after."""
+
+    argv: list[str]
+    stream_status: bool
+    marker: bytes | None
+    cleanup: str | None = None
+
+
+def _windows_shell_command(shell: str, command: str) -> _WindowsCommand:
+    """Build the Windows argv that runs `command` plus its status channel.
+
+    A POSIX shell override keeps the historical `-c` invocation: its fd-9 status
+    channel cannot ride through the job-object spawn (stdin is NUL and no extra
+    handle is inherited), so its status stays the exit-code fallback.
+
+    PowerShell takes the wrapper as `-Command` text (multi-line and quoted
+    commands survive, and no execution policy applies to a command string).
+    cmd.exe only accepts a single line after /c, so its wrapper needs a batch
+    file (verified: a multi-line /c string runs nothing at all).
+    """
+    kind = _shell_kind(shell)
+    if kind not in _WIN_STATUS_KINDS:
+        return _WindowsCommand([shell, "-c", command], False, None)
+    marker = _WIN_COMPLETION_PREFIX + secrets.token_hex(32).encode("ascii")
+    token = marker[len(_WIN_COMPLETION_PREFIX) :].decode("ascii")
+    if kind == "powershell":
+        wrapped = _powershell_wrapper(command, token)
+        return _WindowsCommand(
+            [shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", wrapped], True, marker
+        )
+    path = _write_batch_wrapper(_cmd_wrapper(command, token))
+    # /d /c, not the shell tool's /d /s /c: /s strips the quoting list2cmdline
+    # adds around a spaced temp path, and cmd then re-splits it at the space.
+    return _WindowsCommand([shell, "/d", "/c", path], True, marker, os.path.dirname(path))
+
+
+def _batch_encoding() -> str:
+    # cmd.exe reads batch files in the ANSI code page; it is "mbcs" on Windows
+    # (renamed "ansi"/"oem" in 3.13, which keep the alias), and unrepresentable
+    # text is replaced rather than crashing the command.
+    try:
+        "".encode("mbcs")
+    except LookupError:
+        return locale.getpreferredencoding(False) or "utf-8"
+    return "mbcs"
+
+
+def _write_batch_wrapper(text: str) -> str:
+    """Write a cmd.exe wrapper to a private temp file and return its path.
+
+    cmd.exe /c accepts only one line, so a multi-line command can only run from a
+    batch file. The directory is removed when the handle is reaped (a kernel crash
+    leaves it to the OS temp cleanup, and it holds no more than the command text
+    the child's own command line would show).
+    """
+    directory = tempfile.mkdtemp(prefix="prime-agent-cmd-")
+    path = os.path.join(directory, "command.cmd")
+    with open(path, "w", encoding=_batch_encoding(), errors="replace", newline="") as handle:
+        handle.write(text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n"))
+    return path
+
+
+def _parse_stream_status(raw: bytes) -> int | None:
+    # The wrapper writes one space then the status: "3", "-1"; cmd.exe adds CRLF.
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return None
+
+
+def _powershell_wrapper(command: str, token: str) -> str:
+    """Windows PowerShell wrapper: the user command, then the marker + status line.
+
+    Two PowerShell behaviours force this: `-Command "cmd /c exit 3"` reports 1, not
+    3, because PowerShell collapses a failing native command to a boolean exit
+    code; and there is no inherited fd to carry a status out of band. Each user
+    statement is emitted verbatim, so multi-line commands, quoting and `$`
+    interpolation behave exactly as in a `-Command` invocation, and the two
+    status probes read the user's last statement (`$?` first, because the probe
+    statements themselves overwrite it; `$LASTEXITCODE` is the last native exit
+    code, which is the only place a real code survives). Same convention as
+    wrapPowerShellCommand in packages/coding-agent/src/utils/shell.ts:81-83.
+    Tradeoff: PowerShell exposes no per-statement native status, so a script whose
+    last native command failed and then ran a successful cmdlet still reports that
+    earlier code, and a terminating error (throw) exits before the marker, leaving
+    the status to the process exit code. Non-ASCII output is decoded as UTF-8 by
+    the buffer while PowerShell encodes with the console code page, exactly as the
+    coding-agent shell tool already does.
+    """
+    return (
+        "$global:LASTEXITCODE = $null\n"
+        f"{command}\n"
+        "$__prime_ok = $?\n"
+        "$__prime_code = $LASTEXITCODE\n"
+        "$__prime_status = if ($null -ne $__prime_code) { [int]$__prime_code } "
+        "elseif ($__prime_ok) { 0 } else { 1 }\n"
+        f"[Console]::Out.Write('{_WIN_COMPLETION_PREFIX.decode()}{token} ' "
+        '+ $__prime_status.ToString() + "`n")\n'
+        "[Console]::Out.Flush()\n"
+        # Parity with the POSIX script's trailing `wait`: PowerShell background jobs
+        # keep the shell (and its job-contained tree) alive past the fence.
+        "try { Get-Job -ErrorAction SilentlyContinue | "
+        "Wait-Job -ErrorAction SilentlyContinue | Out-Null } catch { }\n"
+        "exit $__prime_status\n"
+    )
+
+
+def _cmd_wrapper(command: str, token: str) -> str:
+    """cmd.exe wrapper: the user command, then the marker + status line.
+
+    cmd.exe has no `$?`/`$LASTEXITCODE`: ERRORLEVEL after the command is its exit
+    status, so the wrapper captures it before its own `echo` statements can
+    overwrite it and re-exits with the same code. `&` keeps cmd's meaning (a
+    command separator), so background work needs `start /b <cmd>`.
+    """
+    return (
+        "@echo off\n"
+        f"{command}\n"
+        'set "__prime_status=%ERRORLEVEL%"\n'
+        f"echo {_WIN_COMPLETION_PREFIX.decode()}{token} %__prime_status%\n"
+        "exit /b %__prime_status%\n"
+    )
 
 
 def _with_prefix(command: str) -> str:

@@ -603,13 +603,52 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
     async def test_windows_without_bash_raises_teaching_error(self):
         # Windows must raise without consulting PATH: a which() hit would be
         # the same repo-controlled-PATH hole the host-side resolution closed.
+        # SystemRoot points at a tree with no shipped shell, so this holds on
+        # Windows too (a real box always has Windows PowerShell or cmd.exe).
         with mock.patch.object(bash_module, "_IS_POSIX", False):
-            with mock.patch.object(
-                bash_module.shutil, "which", return_value=r"C:\evil\bash.exe"
-            ) as which:
-                with self.assertRaisesRegex(RuntimeError, "PRIME_AGENT_BASH_SHELL"):
-                    bash_module._shell()
-                which.assert_not_called()
+            with mock.patch.dict(os.environ, {"SystemRoot": r"C:\NoSuchWinRoot"}):
+                os.environ.pop("PRIME_AGENT_BASH_SHELL", None)
+                with mock.patch.object(
+                    bash_module.shutil, "which", return_value=r"C:\evil\bash.exe"
+                ) as which:
+                    with self.assertRaisesRegex(RuntimeError, "PRIME_AGENT_BASH_SHELL"):
+                        bash_module._shell()
+                    which.assert_not_called()
+
+    def test_windows_falls_back_to_shipped_shell_without_path(self):
+        # No POSIX shell installed: bash() still works through the shells every
+        # supported Windows ships, resolved by absolute System32 path. PATH is
+        # never consulted, so a repo-controlled PATH cannot supply the shell.
+        with mock.patch.object(bash_module, "_IS_POSIX", False):
+            with mock.patch.dict(os.environ, {"SystemRoot": r"C:\WinTest"}):
+                os.environ.pop("PRIME_AGENT_BASH_SHELL", None)
+                with mock.patch.object(
+                    bash_module.shutil, "which", return_value=r"C:\evil\bash.exe"
+                ) as which:
+                    with mock.patch.object(
+                        bash_module.os.path,
+                        "exists",
+                        side_effect=lambda path: path.endswith("powershell.exe"),
+                    ):
+                        self.assertEqual(
+                            bash_module._shell(),
+                            os.path.join(
+                                r"C:\WinTest",
+                                "System32",
+                                "WindowsPowerShell",
+                                "v1.0",
+                                "powershell.exe",
+                            ),
+                        )
+                    with mock.patch.object(
+                        bash_module.os.path,
+                        "exists",
+                        side_effect=lambda path: path.endswith("cmd.exe"),
+                    ):
+                        self.assertEqual(
+                            bash_module._shell(), os.path.join(r"C:\WinTest", "System32", "cmd.exe")
+                        )
+                    which.assert_not_called()
 
     async def test_pump_delayed_past_old_quiescence_bound_captures_all_output(self):
         # The ordered sentinel must wait through a pump delay beyond the old 500 ms bound.

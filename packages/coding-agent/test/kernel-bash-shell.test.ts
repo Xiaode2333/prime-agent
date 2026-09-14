@@ -1,5 +1,3 @@
-import { homedir } from "node:os";
-import { win32 } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -23,7 +21,6 @@ import {
 	getShellConfig,
 	orderWindowsBashCandidates,
 	resolveKernelBashShell,
-	windowsGitBashCandidates,
 	wrapPowerShellCommand,
 } from "../src/utils/shell.js";
 
@@ -52,13 +49,23 @@ describe("resolveKernelBashShell on win32", () => {
 		expect(mocks.spawnSync).not.toHaveBeenCalled();
 	});
 
-	it("returns the canonical Git Bash install path when present", () => {
+	it("returns Windows PowerShell, not Git Bash, when both are installed", () => {
 		stubWin32();
-		const canonical = "C:\\Program Files\\Git\\bin\\bash.exe";
-		mocks.existsSync.mockImplementation((path: string) => path === canonical);
+		const gitBash = "C:\\Program Files\\Git\\bin\\bash.exe";
+		const powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+		mocks.existsSync.mockImplementation((path: string) => path === gitBash || path === powershell);
 
-		expect(resolveKernelBashShell()).toBe(canonical);
+		expect(resolveKernelBashShell()).toBe(powershell);
 		expect(mocks.spawnSync).not.toHaveBeenCalled();
+	});
+
+	it("honours an explicit Git Bash shellPath", () => {
+		stubWin32();
+		mocks.existsSync.mockReturnValue(true);
+
+		expect(resolveKernelBashShell("C:\\Program Files\\Git\\bin\\bash.exe")).toBe(
+			"C:\\Program Files\\Git\\bin\\bash.exe",
+		);
 	});
 
 	it("returns an explicit shellPath as-is", () => {
@@ -96,74 +103,51 @@ it.each(["C:\\Windows", "C:\\Windows\\", "C:/Windows/", "c:\\WINDOWS\\\\"])(
 	},
 );
 
-describe("windowsGitBashCandidates", () => {
-	it("lists Program Files and the per-user install root", () => {
-		expect(windowsGitBashCandidates("C:\\Users\\dev", "D:\\Program Files", undefined)).toEqual([
-			"D:\\Program Files\\Git\\bin\\bash.exe",
-			"C:\\Users\\dev\\AppData\\Local\\Programs\\Git\\bin\\bash.exe",
-		]);
-	});
-
-	it("skips absent Program Files variables but keeps the per-user root", () => {
-		expect(windowsGitBashCandidates("C:\\Users\\dev", undefined, undefined)).toEqual([
-			"C:\\Users\\dev\\AppData\\Local\\Programs\\Git\\bin\\bash.exe",
-		]);
-	});
-
-	it("resolves the per-user Git Bash install", () => {
-		stubWin32();
-		const perUser = win32.join(homedir(), "AppData", "Local", "Programs", "Git", "bin", "bash.exe");
-		mocks.existsSync.mockImplementation((path: string) => path === perUser);
-		try {
-			expect(resolveKernelBashShell()).toBe(perUser);
-			expect(mocks.spawnSync).not.toHaveBeenCalled();
-		} finally {
-			mocks.existsSync.mockReturnValue(false);
-		}
-	});
-});
-
 describe("getShellConfig on win32", () => {
 	const powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+
+	function withComSpec<T>(value: string, run: () => T): T {
+		const previous = process.env.ComSpec;
+		process.env.ComSpec = value;
+		try {
+			return run();
+		} finally {
+			if (previous === undefined) delete process.env.ComSpec;
+			else process.env.ComSpec = previous;
+		}
+	}
 
 	it("uses Windows PowerShell without any POSIX shell installed", () => {
 		stubWin32();
 		mocks.existsSync.mockImplementation((path: string) => path === powershell);
-		const previousComSpec = process.env.ComSpec;
-		process.env.ComSpec = "C:\\Windows\\System32\\cmd.exe";
-		try {
+
+		withComSpec("C:\\Windows\\System32\\cmd.exe", () => {
 			const config = getShellConfig();
 			expect(config.shell).toBe(powershell);
 			expect(config.kind).toBe("powershell");
 			expect(config.args).toEqual(["-NoProfile", "-NonInteractive", "-Command"]);
 			expect(config.wrapCommand).toBeDefined();
 			expect(mocks.spawnSync).not.toHaveBeenCalled();
-		} finally {
-			if (previousComSpec === undefined) delete process.env.ComSpec;
-			else process.env.ComSpec = previousComSpec;
-		}
+		});
 	});
 
 	it("falls back to cmd.exe when Windows PowerShell is unavailable", () => {
 		stubWin32();
 		mocks.existsSync.mockReturnValue(false);
-		const previousComSpec = process.env.ComSpec;
-		process.env.ComSpec = "C:\\Windows\\System32\\cmd.exe";
-		try {
+
+		withComSpec("C:\\Windows\\System32\\cmd.exe", () => {
 			const config = getShellConfig();
 			expect(config.shell).toBe("C:\\Windows\\System32\\cmd.exe");
 			expect(config.kind).toBe("cmd");
 			expect(config.args).toEqual(["/d", "/s", "/c"]);
 			expect(config.wrapCommand).toBeUndefined();
-		} finally {
-			if (previousComSpec === undefined) delete process.env.ComSpec;
-			else process.env.ComSpec = previousComSpec;
-		}
+		});
 	});
 
 	it("classifies an explicit shellPath instead of assuming POSIX", () => {
 		stubWin32();
 		mocks.existsSync.mockReturnValue(true);
+
 		const config = getShellConfig("C:\\Program Files\\PowerShell\\7\\pwsh.exe");
 		expect(config.kind).toBe("powershell");
 		expect(config.args).toContain("-Command");

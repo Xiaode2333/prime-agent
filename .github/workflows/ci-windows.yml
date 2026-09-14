@@ -58,5 +58,6 @@ jobs:
         working-directory: prime-agent-runtime
         run: |
           python -m pip install --upgrade pip
-          python -m pip install mcp tyro dill
+          python -m pip install -e . dill
           python -m unittest discover -s test -t test -p "test_winjob.py"
+          python -m unittest discover -s test -t test -p "test_bash_windows.py"
