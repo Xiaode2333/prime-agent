@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -183,9 +184,26 @@ export function restrictDaemonSocketPath(socketPath: string): void {
 	chmodSync(socketPath, DAEMON_SOCKET_MODE);
 }
 
-export function getDaemonSocketIdentity(socketPath: string): DaemonSocketIdentity | undefined {
-	if (process.platform === "win32") {
-		return undefined;
+/**
+ * A Windows listen endpoint is a named pipe, which has no filesystem identity to
+ * stat. Derive a stable identity from the endpoint name instead: the supervisor
+ * and the client hash the same name, so a ticket can be validated, while any other
+ * endpoint name yields a different identity. Pipe names are case-insensitive.
+ *
+ * Returning undefined here would make every direct worker transport unissuable on
+ * Windows, because the supervisor and the routed client both require an identity.
+ */
+function windowsSocketIdentity(socketPath: string): DaemonSocketIdentity {
+	const digest = createHash("sha256").update(socketPath.toLowerCase()).digest();
+	return { dev: digest.readUInt32BE(0), ino: digest.readUInt32BE(4) };
+}
+
+export function getDaemonSocketIdentity(
+	socketPath: string,
+	platform: NodeJS.Platform = process.platform,
+): DaemonSocketIdentity | undefined {
+	if (platform === "win32") {
+		return windowsSocketIdentity(socketPath);
 	}
 	const stat = lstatSync(socketPath);
 	return { dev: stat.dev, ino: stat.ino };

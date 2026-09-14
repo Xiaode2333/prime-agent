@@ -288,3 +288,26 @@ describe.skipIf(process.platform === "win32")("DaemonSocketPathLease compromise 
 		}
 	});
 });
+
+describe("getDaemonSocketIdentity on Windows", () => {
+	it("derives a stable identity from the pipe name", () => {
+		const pipe = "\\\\\\.\\pipe\\prime-agent-worker-2245fa1c0e38-bbd685d9a1d5";
+		const identity = getDaemonSocketIdentity(pipe, "win32");
+		expect(identity).toBeDefined();
+		expect(getDaemonSocketIdentity(pipe, "win32")).toEqual(identity);
+	});
+
+	it("distinguishes different pipes", () => {
+		const first = getDaemonSocketIdentity("\\\\\\.\\pipe\\prime-agent-worker-a", "win32");
+		const second = getDaemonSocketIdentity("\\\\\\.\\pipe\\prime-agent-worker-b", "win32");
+		expect(first).toBeDefined();
+		expect(second).toBeDefined();
+		expect(first).not.toEqual(second);
+	});
+
+	it("treats pipe names case-insensitively", () => {
+		expect(getDaemonSocketIdentity("\\\\\\.\\PIPE\\Prime-Agent", "win32")).toEqual(
+			getDaemonSocketIdentity("\\\\\\.\\pipe\\prime-agent", "win32"),
+		);
+	});
+});
