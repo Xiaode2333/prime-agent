@@ -20,6 +20,9 @@ function initDirtyGitRepo(root: string): void {
 	runGit(root, "config", "user.email", "test@example.com");
 	runGit(root, "config", "user.name", "Test");
 	runGit(root, "config", "commit.gpgsign", "false");
+	// Keep restored blobs byte-identical to what the test wrote; Git for Windows
+	// defaults to core.autocrlf=true and would check LF content out as CRLF.
+	runGit(root, "config", "core.autocrlf", "false");
 	writeFileSync(join(root, "tracked.txt"), "committed\n");
 	runGit(root, "add", "tracked.txt");
 	runGit(root, "commit", "-m", "init");

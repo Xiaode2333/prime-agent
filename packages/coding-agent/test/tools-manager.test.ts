@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -35,6 +35,17 @@ const originalOffline = process.env.PI_OFFLINE;
 const pathDir = join(toolState.toolsDir, "path");
 
 function writeExecutable(filePath: string, exitCode = 0): void {
+	if (process.platform === "win32") {
+		if (exitCode === 0) {
+			// Windows cannot launch a shebang script without a shell, so copy the
+			// running Node binary: `--version` exits 0 from a real PE image.
+			copyFileSync(process.execPath, filePath);
+		} else {
+			// An existing path that Windows cannot launch fails the version probe.
+			writeFileSync(filePath, "not an executable image", "utf8");
+		}
+		return;
+	}
 	writeFileSync(filePath, `#!/bin/sh\nexit ${exitCode}\n`, "utf8");
 	chmodSync(filePath, 0o755);
 }
@@ -67,12 +78,17 @@ describe("tools manager", () => {
 	});
 
 	it("accepts managed and PATH tools only when their version check succeeds", () => {
-		const managedPath = join(toolState.toolsDir, "rg");
+		// Windows cannot launch a file without an extension, so this case runs with
+		// the win32 naming rule on a Windows host.
+		const windowsHost = process.platform === "win32";
+		toolState.platform = windowsHost ? "win32" : "linux";
+		const binaryName = windowsHost ? "rg.exe" : "rg";
+		const managedPath = join(toolState.toolsDir, binaryName);
 		writeExecutable(managedPath);
 		expect(getToolPath("rg")).toBe(managedPath);
 
 		writeExecutable(managedPath, 1);
-		const pathBinary = join(pathDir, "rg");
+		const pathBinary = join(pathDir, binaryName);
 		writeExecutable(pathBinary);
 		expect(getToolPath("rg")).toBe("rg");
 

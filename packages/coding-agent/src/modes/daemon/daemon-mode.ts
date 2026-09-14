@@ -10,7 +10,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { basename, dirname, isAbsolute, join, resolve, win32 } from "node:path";
+import { basename, dirname, isAbsolute, join, posix, resolve, win32 } from "node:path";
 import { type Api, findEnvKeys, getLogger, type Model } from "@earendil-works/pi-ai";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import {
@@ -277,7 +277,7 @@ export function supervisorLaunchLockPath(
 	if (platform === "win32") {
 		return win32.join(getAgentDir(), "daemon-locks", `.supervisor-launch-${key}.lock`);
 	}
-	return join(dirname(supervisorSocketPath), `.supervisor-launch-${key}.lock`);
+	return posix.join(posix.dirname(supervisorSocketPath), `.supervisor-launch-${key}.lock`);
 }
 
 const structuredLog = getLogger("coding-agent.daemon");

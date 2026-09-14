@@ -191,7 +191,8 @@ describe("Coding Agent Tools", () => {
 			expect(readFileSync(testFile, "utf-8")).toBe(originalContent);
 		});
 
-		it("should include EACCES for read-only files", async () => {
+		// Windows mode bits are not permissions, so chmod cannot produce EACCES there.
+		it.skipIf(process.platform === "win32")("should include EACCES for read-only files", async () => {
 			const testFile = join(testDir, "edit-readonly.txt");
 			writeFileSync(testFile, "hello\n");
 			chmodSync(testFile, 0o444);
@@ -230,15 +231,19 @@ describe("Coding Agent Tools", () => {
 			expect(result).toEqual({ error: `Could not edit file: ${missingFile}. Error code: ENOENT.` });
 		});
 
-		it("should include EACCES in diff preview for unreadable files", async () => {
-			const unreadableFile = join(testDir, "unreadable-preview.txt");
-			writeFileSync(unreadableFile, "hello\n");
-			chmodSync(unreadableFile, 0o222);
+		// Windows mode bits are not permissions, so chmod cannot produce EACCES there.
+		it.skipIf(process.platform === "win32")(
+			"should include EACCES in diff preview for unreadable files",
+			async () => {
+				const unreadableFile = join(testDir, "unreadable-preview.txt");
+				writeFileSync(unreadableFile, "hello\n");
+				chmodSync(unreadableFile, 0o222);
 
-			const result = await computeEditsDiff(unreadableFile, [{ oldText: "hello", newText: "world" }], testDir);
+				const result = await computeEditsDiff(unreadableFile, [{ oldText: "hello", newText: "world" }], testDir);
 
-			expect(result).toEqual({ error: `Could not edit file: ${unreadableFile}. Error code: EACCES.` });
-		});
+				expect(result).toEqual({ error: `Could not edit file: ${unreadableFile}. Error code: EACCES.` });
+			},
+		);
 	});
 
 	describe("bash tool", () => {
@@ -430,7 +435,13 @@ describe("Coding Agent Tools", () => {
 
 		it("omits the full-output pointer and still succeeds when the spill degrades", async () => {
 			const realTmp = process.env.TMPDIR;
-			process.env.TMPDIR = join(testDir, "no-such-tmp");
+			const realTemp = process.env.TEMP;
+			const realTmpVar = process.env.TMP;
+			const missingTmp = join(testDir, "no-such-tmp");
+			// Node resolves the spill directory from TMPDIR on POSIX and TEMP/TMP on Windows.
+			process.env.TMPDIR = missingTmp;
+			process.env.TEMP = missingTmp;
+			process.env.TMP = missingTmp;
 			try {
 				const operations: BashOperations = {
 					exec: async (_command, _cwd, { onData }) => {
@@ -452,6 +463,10 @@ describe("Coding Agent Tools", () => {
 			} finally {
 				if (realTmp === undefined) delete process.env.TMPDIR;
 				else process.env.TMPDIR = realTmp;
+				if (realTemp === undefined) delete process.env.TEMP;
+				else process.env.TEMP = realTemp;
+				if (realTmpVar === undefined) delete process.env.TMP;
+				else process.env.TMP = realTmpVar;
 			}
 		});
 

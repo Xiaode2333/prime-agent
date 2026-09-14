@@ -2,3 +2,4 @@
 - Fixed uv auto-install on Windows: the kernel bootstrap now drives the Windows PowerShell uv installer instead of the POSIX `curl | sh` pipeline, which failed with `spawn sh ENOENT`.
 - Fixed the Windows batch shim dropping empty arguments: `cmd.exe` leaves `%NAME%` unexpanded when the variable value is empty, so empty values are now passed as an empty quoted pair.
 - Fixed the supervisor relaunch lock on Windows: the lock path was derived from the supervisor socket, which is a named pipe, so it resolved inside the `\\.\pipe\` namespace where no lock file can be created.
+- Made the Windows test surface runnable: Windows-aware fixtures for the tools-manager probes, `core.autocrlf=false` in the destructive-git guard repo, TESTS spill-directory env, `mkdirSync` instead of the POSIX `mkdir` binary, a `file://` hook URL for `--import`, and a documented skip for POSIX mode-bit assertions.

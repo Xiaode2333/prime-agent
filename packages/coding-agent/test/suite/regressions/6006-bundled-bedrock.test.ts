@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { type AssistantMessage, fauxAssistantMessage, type LogEntry } from "@earendil-works/pi-ai";
 import { EventStreamCodec } from "@smithy/core/event-streams";
@@ -161,11 +161,21 @@ registerHooks({
 	},
 });`,
 		);
-		const { stdout, stderr } = await run(process.execPath, ["--import", hookPath, cliPath, "--offline", "--help"], {
-			cwd: harness.tempDir,
-			timeout: 20_000,
-			env: { PATH: process.env.PATH, HOME: harness.tempDir, PRIME_AGENT_CODING_AGENT_DIR: harness.tempDir },
-		});
+		// --import needs a URL specifier: a bare Windows path is rejected by the ESM loader.
+		const { stdout, stderr } = await run(
+			process.execPath,
+			["--import", pathToFileURL(hookPath).href, cliPath, "--offline", "--help"],
+			{
+				cwd: harness.tempDir,
+				timeout: 20_000,
+				env: {
+					PATH: process.env.PATH,
+					HOME: harness.tempDir,
+					USERPROFILE: harness.tempDir,
+					PRIME_AGENT_CODING_AGENT_DIR: harness.tempDir,
+				},
+			},
+		);
 		expect(stdout + stderr).toContain("Usage:");
 	});
 
