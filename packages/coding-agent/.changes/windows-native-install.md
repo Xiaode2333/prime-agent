@@ -1,3 +1,4 @@
 - Added `install.ps1`, a native Windows installer that resolves the release version, verifies the npm tarball SHA-256, installs it globally, prepares uv for the Python kernel, and updates the user PATH, plus Windows setup documentation and a Windows CI job.
 - Fixed uv auto-install on Windows: the kernel bootstrap now drives the Windows PowerShell uv installer instead of the POSIX `curl | sh` pipeline, which failed with `spawn sh ENOENT`.
 - Fixed the Windows batch shim dropping empty arguments: `cmd.exe` leaves `%NAME%` unexpanded when the variable value is empty, so empty values are now passed as an empty quoted pair.
+- Fixed the supervisor relaunch lock on Windows: the lock path was derived from the supervisor socket, which is a named pipe, so it resolved inside the `\\.\pipe\` namespace where no lock file can be created.

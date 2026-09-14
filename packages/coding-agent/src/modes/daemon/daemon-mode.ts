@@ -10,11 +10,12 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { type Api, findEnvKeys, getLogger, type Model } from "@earendil-works/pi-ai";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import {
 	appendRotatingLog,
+	getAgentDir,
 	getCronJobsPath,
 	getDaemonLogPath,
 	getDaemonUpdateRestartManifestPath,
@@ -262,6 +263,22 @@ export type {
 	SessionSummary,
 } from "./daemon-session-list.js";
 export { defaultDaemonSocketPath } from "./daemon-socket.js";
+
+/**
+ * Lock path used to serialize supervisor relaunches. On Windows the supervisor
+ * socket is a named pipe, so dirname() resolves inside the \\.\pipe\ namespace
+ * where no file can be created; the lock has to live on disk instead.
+ */
+export function supervisorLaunchLockPath(
+	supervisorSocketPath: string,
+	key: string,
+	platform: NodeJS.Platform = process.platform,
+): string {
+	if (platform === "win32") {
+		return win32.join(getAgentDir(), "daemon-locks", `.supervisor-launch-${key}.lock`);
+	}
+	return join(dirname(supervisorSocketPath), `.supervisor-launch-${key}.lock`);
+}
 
 const structuredLog = getLogger("coding-agent.daemon");
 const WORKER_SNAPSHOT_TERMINAL_DRAIN_TIMEOUT_MS = 1_000;
@@ -942,7 +959,8 @@ export class AgentDaemon {
 		}
 		this.supervisorLaunchInProgress = true;
 		const key = createHash("sha256").update(supervisorSocketPath).digest("hex").slice(0, 12);
-		const lockDirectory = join(dirname(supervisorSocketPath), `.supervisor-launch-${key}.lock`);
+		const lockDirectory = supervisorLaunchLockPath(supervisorSocketPath, key);
+		mkdirSync(dirname(lockDirectory), { recursive: true });
 		let ownsLock = false;
 		try {
 			for (let attempt = 0; attempt < 3 && !ownsLock; attempt++) {

@@ -1,10 +1,10 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getProcessStartId } from "../src/core/session-lease.js";
-import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
+import { AgentDaemon, supervisorLaunchLockPath } from "../src/modes/daemon/daemon-mode.js";
 import * as childProcesses from "../src/utils/child-process.js";
 
 interface Claim {
@@ -179,5 +179,20 @@ describe("supervisor replacement launch ownership", () => {
 		expect(kill).not.toHaveBeenCalled();
 		expect(child.signalCode).toBeNull();
 		expect(daemon.log).toHaveBeenCalledWith(expect.stringContaining("without a current authenticated supervisor"));
+	});
+});
+
+describe("supervisorLaunchLockPath", () => {
+	it("keeps the lock beside the socket on POSIX", () => {
+		expect(supervisorLaunchLockPath("/tmp/prime-1000/daemon.sock", "abc123", "linux")).toBe(
+			"/tmp/prime-1000/.supervisor-launch-abc123.lock",
+		);
+	});
+
+	it("moves the lock off the pipe namespace on Windows", () => {
+		const lockPath = supervisorLaunchLockPath("\\\\.\\pipe\\prime-agent-daemon", "abc123", "win32");
+		expect(lockPath.startsWith("\\\\.\\pipe")).toBe(false);
+		expect(win32.basename(lockPath)).toBe(".supervisor-launch-abc123.lock");
+		expect(win32.dirname(lockPath).endsWith("daemon-locks")).toBe(true);
 	});
 });
