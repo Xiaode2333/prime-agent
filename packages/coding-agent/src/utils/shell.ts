@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { delimiter, win32 } from "node:path";
 import { getBinDir } from "../config.js";
 import { recordOrphanProcessState } from "../core/orphan-process-journal.js";
@@ -71,16 +72,9 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 	}
 
 	if (process.platform === "win32") {
-		// 2. Try Git Bash in known locations
-		const paths: string[] = [];
-		const programFiles = process.env.ProgramFiles;
-		if (programFiles) {
-			paths.push(`${programFiles}\\Git\\bin\\bash.exe`);
-		}
-		const programFilesX86 = process.env["ProgramFiles(x86)"];
-		if (programFilesX86) {
-			paths.push(`${programFilesX86}\\Git\\bin\\bash.exe`);
-		}
+		// 2. Try Git Bash in known locations, including the per-user root used by a
+		// non-elevated Git for Windows install.
+		const paths = windowsGitBashCandidates(homedir(), process.env.ProgramFiles, process.env["ProgramFiles(x86)"]);
 
 		for (const path of paths) {
 			if (existsSync(path)) {
@@ -116,15 +110,38 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 	return { shell: "sh", args: ["-c"] };
 }
 
-// Hardcoded literals: ProgramFiles env vars are ambient attacker-influenceable
-// input, the same trust-laundering class as PATH.
-const WINDOWS_GIT_BASH_PATHS = ["C:\\Program Files\\Git\\bin\\bash.exe", "C:\\Program Files (x86)\\Git\\bin\\bash.exe"];
+// Literal Program Files roots: the env vars of the same name are ambient
+// attacker-influenceable input, the same trust-laundering class as PATH.
+const PROGRAM_FILES_ROOT = "C:\\Program Files";
+const PROGRAM_FILES_X86_ROOT = "C:\\Program Files (x86)";
+
+/**
+ * Git for Windows install roots, including the per-user root that a non-elevated
+ * install uses. Derived from the home directory and the two literal Program Files
+ * roots, never from PATH.
+ */
+export function windowsGitBashCandidates(
+	homeDirectory: string,
+	programFiles: string | undefined,
+	programFilesX86: string | undefined,
+): string[] {
+	const candidates: string[] = [];
+	if (programFiles) {
+		candidates.push(win32.join(programFiles, "Git", "bin", "bash.exe"));
+	}
+	if (programFilesX86) {
+		candidates.push(win32.join(programFilesX86, "Git", "bin", "bash.exe"));
+	}
+	candidates.push(win32.join(homeDirectory, "AppData", "Local", "Programs", "Git", "bin", "bash.exe"));
+	return candidates;
+}
 
 /**
  * Absolute default shell for the kernel's bash(): explicit shellPath wins; POSIX
  * uses /bin/bash else /bin/sh (absolute, never PATH — the kernel inherits a
- * user-influenced PATH); win32 uses only the canonical Git Bash install paths,
- * never PATH (a repo-controlled PATH/where.exe must not pick the kernel shell).
+ * user-influenced PATH); win32 uses only the literal Git Bash roots plus the
+ * per-user root under the home directory, never PATH (a repo-controlled
+ * PATH/where.exe must not pick the kernel shell).
  * undefined = no shell found: kernel startup must not fail, bash() raises its
  * teaching error.
  */
@@ -136,7 +153,7 @@ export function resolveKernelBashShell(customShellPath?: string): string | undef
 	if (process.platform !== "win32") {
 		return existsSync("/bin/bash") ? "/bin/bash" : "/bin/sh";
 	}
-	for (const path of WINDOWS_GIT_BASH_PATHS) {
+	for (const path of windowsGitBashCandidates(homedir(), PROGRAM_FILES_ROOT, PROGRAM_FILES_X86_ROOT)) {
 		if (existsSync(path)) {
 			return path;
 		}
@@ -248,12 +265,20 @@ export function killTrackedDetachedChildren(): void {
  */
 export function killProcessTree(pid: number): void {
 	if (process.platform === "win32") {
-		// Use taskkill on Windows to kill process tree
+		// Absolute System32 taskkill with NoDefaultCurrentDirectoryInExePath: a bare
+		// name could resolve an attacker-planted taskkill.exe from the CWD, and the
+		// async ENOENT must not surface as an unhandled ChildProcess "error" event.
 		try {
-			spawnHidden("taskkill", ["/F", "/T", "/PID", String(pid)], {
-				stdio: "ignore",
-				detached: true,
-			});
+			const child = spawnHidden(
+				win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe"),
+				["/F", "/T", "/PID", String(pid)],
+				{
+					stdio: "ignore",
+					detached: true,
+					env: { ...process.env, NoDefaultCurrentDirectoryInExePath: "1" },
+				},
+			);
+			child.on("error", () => {});
 		} catch {
 			// Ignore errors if taskkill fails
 		}

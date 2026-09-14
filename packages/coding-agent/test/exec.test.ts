@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { execCommand } from "../src/core/exec.js";
+import { execCommand, mergeExecEnv } from "../src/core/exec.js";
 
 const SIGKILL_EXIT_CODE = 128 + constants.signals.SIGKILL;
 
@@ -48,5 +48,53 @@ describe.skipIf(process.platform === "win32")("execCommand", () => {
 			await resultPromise;
 			rmSync(testDir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("mergeExecEnv", () => {
+	const KEY = "PRIME_EXEC_TEST_CASE";
+	const LOWER = KEY.toLowerCase();
+
+	function withInheritedKey<T>(value: string, run: () => T): T {
+		const previous = process.env[LOWER];
+		process.env[LOWER] = value;
+		try {
+			return run();
+		} finally {
+			if (previous === undefined) delete process.env[LOWER];
+			else process.env[LOWER] = previous;
+		}
+	}
+
+	function matchingKeys(env: NodeJS.ProcessEnv | undefined): string[] {
+		return Object.keys(env ?? {}).filter((key) => key.toLowerCase() === LOWER);
+	}
+
+	it("unsets an inherited differently-cased key on Windows", () => {
+		withInheritedKey("inherited", () => {
+			expect(matchingKeys(mergeExecEnv({ [KEY]: undefined }, "win32"))).toEqual([]);
+		});
+	});
+
+	it("replaces an inherited differently-cased key on Windows", () => {
+		withInheritedKey("inherited", () => {
+			const merged = mergeExecEnv({ [KEY]: "replacement" }, "win32");
+			expect(matchingKeys(merged)).toEqual([KEY]);
+			expect(merged?.[KEY]).toBe("replacement");
+		});
+	});
+
+	it("keeps exact-key semantics on POSIX", () => {
+		withInheritedKey("inherited", () => {
+			const merged = mergeExecEnv({ [KEY]: undefined }, "linux");
+			expect(matchingKeys(merged)).toEqual([LOWER]);
+			expect(merged?.[LOWER]).toBe("inherited");
+		});
+	});
+
+	it("leaves unrelated keys untouched", () => {
+		const merged = mergeExecEnv({ [KEY]: "value" }, "linux");
+		expect(merged?.[KEY]).toBe("value");
+		expect(merged?.PATH ?? "").toBe(process.env.PATH ?? "");
 	});
 });

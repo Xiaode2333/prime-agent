@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { win32 } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -17,7 +19,7 @@ vi.mock("child_process", async (importOriginal) => {
 	return { ...actual, spawnSync: mocks.spawnSync };
 });
 
-import { orderWindowsBashCandidates, resolveKernelBashShell } from "../src/utils/shell.js";
+import { orderWindowsBashCandidates, resolveKernelBashShell, windowsGitBashCandidates } from "../src/utils/shell.js";
 
 const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 
@@ -87,3 +89,30 @@ it.each(["C:\\Windows", "C:\\Windows\\", "C:/Windows/", "c:\\WINDOWS\\\\"])(
 		expect(orderWindowsBashCandidates([backslashWsl, scoop], systemRoot)).toEqual([scoop, backslashWsl]);
 	},
 );
+
+describe("windowsGitBashCandidates", () => {
+	it("lists Program Files and the per-user install root", () => {
+		expect(windowsGitBashCandidates("C:\\Users\\dev", "D:\\Program Files", undefined)).toEqual([
+			"D:\\Program Files\\Git\\bin\\bash.exe",
+			"C:\\Users\\dev\\AppData\\Local\\Programs\\Git\\bin\\bash.exe",
+		]);
+	});
+
+	it("skips absent Program Files variables but keeps the per-user root", () => {
+		expect(windowsGitBashCandidates("C:\\Users\\dev", undefined, undefined)).toEqual([
+			"C:\\Users\\dev\\AppData\\Local\\Programs\\Git\\bin\\bash.exe",
+		]);
+	});
+
+	it("resolves the per-user Git Bash install", () => {
+		stubWin32();
+		const perUser = win32.join(homedir(), "AppData", "Local", "Programs", "Git", "bin", "bash.exe");
+		mocks.existsSync.mockImplementation((path: string) => path === perUser);
+		try {
+			expect(resolveKernelBashShell()).toBe(perUser);
+			expect(mocks.spawnSync).not.toHaveBeenCalled();
+		} finally {
+			mocks.existsSync.mockReturnValue(false);
+		}
+	});
+});

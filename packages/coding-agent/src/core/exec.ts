@@ -31,15 +31,32 @@ export interface ExecResult {
 	killed: boolean;
 }
 
-function mergeExecEnv(env?: Record<string, string | undefined>): NodeJS.ProcessEnv | undefined {
+/**
+ * Windows environment names are case-insensitive: without folding, unsetting
+ * `PATH` leaves an inherited `Path` in place and setting `PATH` alongside it
+ * leaves a duplicate pair that libuv collapses to a single value.
+ */
+export function mergeExecEnv(
+	env?: Record<string, string | undefined>,
+	platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv | undefined {
 	if (!env) {
 		return undefined;
 	}
+	const caseInsensitive = platform === "win32";
 	const merged: NodeJS.ProcessEnv = { ...process.env };
 	for (const [key, value] of Object.entries(env)) {
-		if (value === undefined) {
-			delete merged[key];
-		} else {
+		// Every case variant must go: a duplicate pair survives to the child only
+		// once, so leaving one behind would resurrect the value the caller cleared.
+		const matchingKeys = caseInsensitive
+			? Object.keys(merged).filter((candidate) => candidate.toLowerCase() === key.toLowerCase())
+			: key in merged
+				? [key]
+				: [];
+		for (const match of matchingKeys) {
+			delete merged[match];
+		}
+		if (value !== undefined) {
 			merged[key] = value;
 		}
 	}
