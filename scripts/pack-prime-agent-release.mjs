@@ -220,9 +220,28 @@ function copyPackageContents(sourceDir, targetDir, packageJson) {
 	}
 }
 
-function run(command, args, cwd) {
+/**
+ * npm is a .cmd shim on Windows, which Node cannot spawn without a shell, and
+ * routing arguments through a shell re-splits paths that contain spaces. Run npm's
+ * JavaScript entry point through the current runtime instead, and fall back to the
+ * npm shim through a shell only when no entry point is found.
+ */
+function npmInvocation() {
+	const execPath = process.env.npm_execpath;
+	if (execPath && existsSync(execPath)) {
+		return { command: process.execPath, prefixArgs: [execPath], shell: false };
+	}
+	const sibling = join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+	if (existsSync(sibling)) {
+		return { command: process.execPath, prefixArgs: [sibling], shell: false };
+	}
+	return { command: "npm", prefixArgs: [], shell: process.platform === "win32" };
+}
+
+function run(command, args, cwd, shell = false) {
 	const result = spawnSync(command, args, {
 		cwd,
+		shell,
 		stdio: "pipe",
 		encoding: "utf8",
 	});
@@ -307,10 +326,17 @@ function main() {
 			renameSync(join(bundleDir, "cli.js"), join(bundleDir, "cli-node.js"));
 			cpSync(join(stagingDir, "dist/cli/npm-native-bridge.js"), join(bundleDir, "cli.js"));
 			cpSync(join(root, "install.sh"), join(stagingDir, "dist/install.sh"));
+			cpSync(join(root, "install.ps1"), join(stagingDir, "dist/install.ps1"));
 			writeJson(join(stagingDir, "dist/native-release.json"), { baseUrl: args.baseUrl, version: releaseVersion });
 		}
 
-		const tarballName = run("npm", ["pack", stagingDir, "--pack-destination", artifactsDir, "--silent"], root)
+		const npm = npmInvocation();
+		const tarballName = run(
+			npm.command,
+			[...npm.prefixArgs, "pack", stagingDir, "--pack-destination", artifactsDir, "--silent"],
+			root,
+			npm.shell,
+		)
 			.split("\n")
 			.at(-1);
 		if (!tarballName) {

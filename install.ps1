@@ -109,7 +109,13 @@ function Get-RemoteText {
 	} catch {
 		Fail "could not download $Url. $($_.Exception.Message)"
 	}
-	return $response.Content.Trim()
+	# Windows PowerShell 5.1 returns .Content as [byte[]] when the response has no
+	# decodable charset, so decode before trimming.
+	$content = $response.Content
+	if ($content -is [byte[]]) {
+		$content = [System.Text.Encoding]::UTF8.GetString($content)
+	}
+	return ([string]$content).Trim()
 }
 
 function Get-RemoteFile {

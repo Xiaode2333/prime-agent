@@ -9,3 +9,5 @@
 - Hardened `%USERPROFILE%\.prime` with a Windows ACL (`icacls` inheritance removal plus an owner-only grant) because mode bits are not access control on Windows.
 - Converted the bundled skills and skill docs from bash to PowerShell/Python examples.
 - The kernel's `bash()` also runs without a POSIX shell on Windows: it resolves Windows PowerShell then cmd.exe (never PATH), takes its status from a wrapper line instead of the POSIX status fd, and reports the command's own exit code; the resolving host now selects the same shipped shell for the kernel and the shell tool, so Git Bash is used only when `shellPath` names it.
+- Fixed the release packer on Windows: it spawned the `npm` shim directly, which Node cannot execute, so every pack failed; it now runs npm's JavaScript entry point through the current runtime, and ships `install.ps1` beside `install.sh`.
+- Fixed `install.ps1` on Windows PowerShell 5.1, where `Invoke-WebRequest.Content` can be a byte array and the version lookup crashed on `.Trim()`.
