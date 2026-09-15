@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -13,6 +12,7 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 import type { KeybindingsManager } from "../../../core/keybindings.js";
+import { launchEditor } from "../../../utils/editor-command.js";
 import { getEditorTheme, theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
 import { keyHint } from "./keybinding-hints.js";
@@ -109,15 +109,19 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 			fs.writeFileSync(tmpFile, currentText, "utf-8");
 			this.tui.stop();
 
-			const [editor, ...editorArgs] = editorCmd.split(" ");
-			const result = spawnSync(editor, [...editorArgs, tmpFile], {
-				stdio: "inherit",
-				shell: process.platform === "win32",
-			});
+			// Parse quotes here and spawn the executable directly: a plain split(" ")
+			// breaks an editor under a path with spaces, the normal Windows case.
+			const result = launchEditor(editorCmd, tmpFile);
 
 			if (result.status === 0) {
 				const newContent = fs.readFileSync(tmpFile, "utf-8").replace(/\n$/, "");
 				this.editor.setText(newContent);
+			} else if (result.error) {
+				// This component has no status line of its own, so surface the failure
+				// in the text the user is about to see instead of dropping it.
+				this.editor.setText(
+					`${currentText}\n\n[Could not start the editor (${editorCmd}): ${result.error.message}]`,
+				);
 			}
 		} finally {
 			try {

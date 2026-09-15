@@ -145,6 +145,7 @@ import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
 import { spawnHidden, spawnSyncHidden } from "../../utils/child-process.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
 import { readClipboardImage } from "../../utils/clipboard-image.js";
+import { launchEditor } from "../../utils/editor-command.js";
 import { parseGitUrl } from "../../utils/git.js";
 import { resizeImage } from "../../utils/image-resize.js";
 import { getCwdRelativePath } from "../../utils/paths.js";
@@ -7565,21 +7566,20 @@ export class InteractiveMode {
 			// Stop TUI to release terminal
 			this.ui.stop();
 
-			// Split by space to support editor arguments (e.g., "code --wait")
-			const [editor, ...editorArgs] = editorCmd.split(" ");
-
-			// Spawn editor synchronously with inherited stdio for interactive editing
-			const result = spawnSync(editor, [...editorArgs, tmpFile], {
-				stdio: "inherit",
-				shell: process.platform === "win32",
-			});
+			// Parse quotes here and spawn the executable directly: a plain split(" ")
+			// breaks an editor under a path with spaces, which is the normal Windows case.
+			const result = launchEditor(editorCmd, tmpFile);
 
 			// On successful exit (status 0), replace editor content
 			if (result.status === 0) {
 				const newContent = fs.readFileSync(tmpFile, "utf-8").replace(/\n$/, "");
 				this.editor.setText(newContent);
+			} else if (result.error) {
+				this.showWarning(`Could not start the editor (${editorCmd}): ${result.error.message}`);
+			} else {
+				// Keep the original text, but say so instead of discarding the edit silently.
+				this.showWarning(`The editor exited with status ${result.status}; keeping the original text.`);
 			}
-			// On non-zero exit, keep original text (no action needed)
 		} finally {
 			// Clean up temp file
 			try {
