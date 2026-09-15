@@ -21,6 +21,20 @@ function getTextOutput(result: any): string {
 	);
 }
 
+// The bash tool drives Windows PowerShell on win32 and a POSIX shell elsewhere,
+// so fixtures that use real shell syntax need a per-platform spelling.
+const IS_WINDOWS = process.platform === "win32";
+
+/** Pick the POSIX spelling off Windows and the Windows PowerShell spelling on win32. */
+function platformCommand(posix: string, windows: string): string {
+	return IS_WINDOWS ? windows : posix;
+}
+
+/** `count` numbered lines: `seq` on POSIX, a PowerShell range on Windows. */
+function numberedLines(count: number): string {
+	return platformCommand(`seq ${count}`, `1..${count}`);
+}
+
 describe("Coding Agent Tools", () => {
 	let testDir: string;
 
@@ -349,11 +363,14 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should prepend command prefix when configured", async () => {
+			// The assignment and its expansion need the running shell's syntax.
 			const bashWithPrefix = createBashTool(testDir, {
-				commandPrefix: "export TEST_VAR=hello",
+				commandPrefix: platformCommand("export TEST_VAR=hello", "$env:TEST_VAR='hello'"),
 			});
 
-			const result = await bashWithPrefix.execute("test-prefix-1", { command: "echo $TEST_VAR" });
+			const result = await bashWithPrefix.execute("test-prefix-1", {
+				command: platformCommand("echo $TEST_VAR", "Write-Output $env:TEST_VAR"),
+			});
 			expect(getTextOutput(result).trim()).toBe("hello");
 		});
 
@@ -363,7 +380,8 @@ describe("Coding Agent Tools", () => {
 			});
 
 			const result = await bashWithPrefix.execute("test-prefix-2", { command: "echo command-output" });
-			expect(getTextOutput(result).trim()).toBe("prefix-output\ncommand-output");
+			// Windows PowerShell separates lines with CRLF; normalize before comparing.
+			expect(getTextOutput(result).replace(/\r\n/g, "\n").trim()).toBe("prefix-output\ncommand-output");
 		});
 
 		it("should work without command prefix", async () => {
@@ -413,21 +431,27 @@ describe("Coding Agent Tools", () => {
 			const ops = createLocalBashOperations();
 			const chunks: Buffer[] = [];
 
-			const result = await ops.exec("echo $TEST_LOCAL_BASH_OPS", testDir, {
-				onData: (data) => chunks.push(data),
-				env: { ...process.env, TEST_LOCAL_BASH_OPS: "from-local-ops" },
-			});
+			const result = await ops.exec(
+				platformCommand("echo $TEST_LOCAL_BASH_OPS", "Write-Output $env:TEST_LOCAL_BASH_OPS"),
+				testDir,
+				{
+					onData: (data) => chunks.push(data),
+					env: { ...process.env, TEST_LOCAL_BASH_OPS: "from-local-ops" },
+				},
+			);
 
 			expect(result.exitCode).toBe(0);
 			expect(Buffer.concat(chunks).toString("utf-8").trim()).toBe("from-local-ops");
 		});
 
 		it("should preserve executeBash sanitization when using local bash operations", async () => {
-			const result = await executeBashWithOperations(
+			// Emit the same ANSI red + CRLF bytes in the running shell's syntax: printf
+			// on POSIX, a raw Console write with escaped chars on Windows PowerShell.
+			const command = platformCommand(
 				"printf '\\033[31mred\\033[0m\\r\\n'",
-				process.cwd(),
-				createLocalBashOperations(),
+				'[Console]::Out.Write("$([char]27)[31mred$([char]27)[0m`r`n")',
 			);
+			const result = await executeBashWithOperations(command, process.cwd(), createLocalBashOperations());
 
 			expect(result.exitCode).toBe(0);
 			expect(result.output).toBe("red\n");
@@ -472,7 +496,7 @@ describe("Coding Agent Tools", () => {
 
 		it("should persist full output when truncation happens by line count only", async () => {
 			const bash = createBashTool(testDir);
-			const result = await bash.execute("test-call-line-truncation", { command: "seq 3000" });
+			const result = await bash.execute("test-call-line-truncation", { command: numberedLines(3000) });
 			const output = getTextOutput(result);
 			const fullOutputPath = result.details?.fullOutputPath;
 
@@ -488,13 +512,18 @@ describe("Coding Agent Tools", () => {
 
 			expect(fullOutputPath).toBeDefined();
 			expect(existsSync(fullOutputPath!)).toBe(true);
-			const fullOutput = readFileSync(fullOutputPath!, "utf-8");
+			// Windows PowerShell writes CRLF line endings; normalize before comparing.
+			const fullOutput = readFileSync(fullOutputPath!, "utf-8").replace(/\r\n/g, "\n");
 			expect(fullOutput).toContain("1\n2\n3");
 			expect(fullOutput).toContain("2998\n2999\n3000");
 		});
 
 		it("executeBash should persist full output when truncation happens by line count only", async () => {
-			const result = await executeBashWithOperations("seq 3000", process.cwd(), createLocalBashOperations());
+			const result = await executeBashWithOperations(
+				numberedLines(3000),
+				process.cwd(),
+				createLocalBashOperations(),
+			);
 			const fullOutputPath = result.fullOutputPath;
 
 			expect(result.truncated).toBe(true);
@@ -506,7 +535,8 @@ describe("Coding Agent Tools", () => {
 
 			expect(fullOutputPath).toBeDefined();
 			expect(existsSync(fullOutputPath!)).toBe(true);
-			const fullOutput = readFileSync(fullOutputPath!, "utf-8");
+			// Windows PowerShell writes CRLF line endings; normalize before comparing.
+			const fullOutput = readFileSync(fullOutputPath!, "utf-8").replace(/\r\n/g, "\n");
 			expect(fullOutput).toContain("1\n2\n3");
 			expect(fullOutput).toContain("2998\n2999\n3000");
 		});

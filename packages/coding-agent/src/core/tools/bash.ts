@@ -7,9 +7,11 @@ import { truncateToVisualLines } from "../../modes/interactive/components/visual
 import { theme } from "../../modes/interactive/theme/theme.js";
 import { spawnHidden, waitForChildProcess } from "../../utils/child-process.js";
 import {
+	classifyShell,
 	getShellConfig,
 	getShellEnv,
 	killProcessTree,
+	type ShellKind,
 	trackDetachedChildPid,
 	untrackDetachedChildPid,
 } from "../../utils/shell.js";
@@ -314,10 +316,252 @@ export interface DiscardProbeTarget {
 /** The probe cannot safely determine the repository the discard targets. */
 export const UNRESOLVABLE_DISCARD_TARGET = "unresolvable";
 
+/**
+ * Shell family whose syntax the probe command is built and analyzed in.
+ * `getShellConfig` is the single source of truth for the shell that actually runs
+ * the command, so an explicit shellPath is respected and platform defaults apply
+ * otherwise. A config without a kind falls back to the shell name, then POSIX.
+ */
+function guardShellKind(shellPath?: string): ShellKind {
+	try {
+		return getShellConfig(shellPath).kind ?? "posix";
+	} catch {
+		return shellPath ? classifyShell(shellPath) : "posix";
+	}
+}
+
+/** Relative or absolute directory a discard chain relocates into. */
+interface ShellRelocation {
+	/** Directory arguments of the cd/Set-Location chain; "" means the home directory. */
+	cdDirs: string[];
+	/** Inline repository-locating env assignments (GIT_DIR, GIT_WORK_TREE, ...). */
+	envAssignments: Array<{ name: string; value: string }>;
+}
+
+/** Quote a value for PowerShell single-quoted (literal, non-expanding) string syntax. */
+function powerShellLiteral(value: string): string {
+	return `'${value.replace(/'/g, "''")}'`;
+}
+
+/** Characters a bare PowerShell word cannot contain and still be replayed literally. */
+function isSafePowerShellLiteral(value: string): boolean {
+	return value.length > 0 && !/[\s'"$`;&|()<>#]/.test(value);
+}
+
+/**
+ * Parse one PowerShell word into its literal value, or undefined when it cannot
+ * be replayed (variable/subexpression, unbalanced quotes, metacharacters).
+ */
+function parsePowerShellToken(text: string): string | undefined {
+	const trimmed = text.trim();
+	if (trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'")) {
+		const inner = trimmed.slice(1, -1);
+		return inner.includes("'") ? undefined : inner;
+	}
+	if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+		const inner = trimmed.slice(1, -1);
+		// Double quotes expand $variables and backtick escapes; refuse those.
+		return /["$`]/.test(inner) ? undefined : inner;
+	}
+	return isSafePowerShellLiteral(trimmed) ? trimmed : undefined;
+}
+
+/** Characters a cmd.exe word cannot contain and still be replayed literally. */
+function isSafeCmdLiteral(value: string): boolean {
+	return value.length > 0 && !/["&|<>^%!]/.test(value);
+}
+
+/** Parse one cmd.exe word into its literal value, or undefined when it cannot be replayed. */
+function parseCmdToken(text: string): string | undefined {
+	const trimmed = text.trim();
+	if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+		const inner = trimmed.slice(1, -1);
+		return isSafeCmdLiteral(inner) ? inner : undefined;
+	}
+	return /^[^\s"&|<>^%!]+$/.test(trimmed) ? trimmed : undefined;
+}
+
+/** Build the cd/Set-Location chain prefix in the syntax of `shell`. */
+function buildCdPrefix(shell: ShellKind, cdDirs: string[]): string {
+	if (cdDirs.length === 0) return "";
+	if (shell === "powershell") {
+		const chain = cdDirs.map((dir) => (dir ? `Set-Location -LiteralPath ${powerShellLiteral(dir)}` : "Set-Location"));
+		return `${chain.join("; ")}; `;
+	}
+	if (shell === "cmd") {
+		return `${cdDirs.map((dir) => `cd /d "${dir}"`).join(" && ")} && `;
+	}
+	return `${cdDirs.map((dir) => (dir ? `cd ${dir}` : "cd")).join(" && ")} && `;
+}
+
+/** Build the inline env-assignment prefix in the syntax of `shell`. */
+function buildEnvPrefix(shell: ShellKind, assignments: Array<{ name: string; value: string }>): string {
+	if (assignments.length === 0) return "";
+	if (shell === "powershell") {
+		return `${assignments.map((assignment) => `$env:${assignment.name}=${powerShellLiteral(assignment.value)}`).join("; ")}; `;
+	}
+	if (shell === "cmd") {
+		return `${assignments.map((assignment) => `set "${assignment.name}=${assignment.value}"`).join(" && ")} && `;
+	}
+	return `${assignments.map((assignment) => `${assignment.name}=${assignment.value}`).join(" ")} `;
+}
+
+/**
+ * Analyze a PowerShell relocation chain (Set-Location/cd, $env: assignments) that
+ * runs before the discard. Refuses grouping parentheses and anything that cannot
+ * be replayed, because silently probing the wrong repository loses work.
+ */
+function resolvePowerShellRelocation(
+	prefix: string,
+	userCommandStart: number,
+): ShellRelocation | typeof UNRESOLVABLE_DISCARD_TARGET {
+	// Parentheses change where a location change applies and $() cannot be
+	// replayed; their semantics are unclear, so refuse instead of guessing.
+	if (/[()]/.test(prefix)) return UNRESOLVABLE_DISCARD_TARGET;
+	const cdDirs: string[] = [];
+	const envAssignments: Array<{ name: string; value: string }> = [];
+	const parts = prefix.split(/(&&|\|\||;|\n|\|)/);
+	let offset = 0;
+	let cdPendingSeparator = false;
+	for (const [index, part] of parts.entries()) {
+		const start = offset;
+		offset += part.length;
+		if (start < userCommandStart) continue; // command-prefix region: replayed as-is
+		if (part === "&&" || part === "||" || part === ";" || part === "\n" || part === "|") {
+			if (part === "||" || part === "|") {
+				if (cdPendingSeparator) return UNRESOLVABLE_DISCARD_TARGET; // cd success not guaranteed
+				continue;
+			}
+			// `;` and a newline run the next statement regardless of the previous
+			// one, exactly like the replayed probe, so the probed directory still
+			// matches the directory the discard runs in.
+			cdPendingSeparator = false;
+			continue;
+		}
+		const trimmed = part.trim();
+		if (!trimmed) {
+			cdPendingSeparator = false;
+			continue;
+		}
+		if (index === parts.length - 1) {
+			// The words abutting the git invocation must be replayable. A POSIX-style
+			// inline NAME=value or an unrecognized word is not valid PowerShell and
+			// cannot be replayed, so refuse rather than probe blindly.
+			for (const token of trimmed.split(/\s+/).filter(Boolean)) {
+				if (token === "sudo" || token === "env" || token === "command" || token.endsWith("/")) continue;
+				return UNRESOLVABLE_DISCARD_TARGET;
+			}
+			continue;
+		}
+		const env = /^\$env:([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/i.exec(trimmed);
+		if (env) {
+			const value = parsePowerShellToken(env[2]);
+			if (value === undefined) return UNRESOLVABLE_DISCARD_TARGET;
+			envAssignments.push({ name: env[1], value });
+			cdPendingSeparator = false;
+			continue;
+		}
+		// push/pop-location change or restore the location and cannot be replayed.
+		if (/^(?:push-location|pop-location|pushd|popd)\b/i.test(trimmed)) return UNRESOLVABLE_DISCARD_TARGET;
+		const cd = /^(?:set-location|chdir|cd|sl)\b(.*)$/i.exec(trimmed);
+		if (cd) {
+			let rest = cd[1].trim();
+			const option = /^-(?:literalpath|path)\b\s*(.*)$/i.exec(rest);
+			if (option) rest = option[1].trim();
+			if (!rest) {
+				cdDirs.push(""); // no argument: Set-Location relocates to the home directory
+				cdPendingSeparator = true;
+				continue;
+			}
+			if (rest.startsWith("-")) return UNRESOLVABLE_DISCARD_TARGET; // other Set-Location parameters
+			const dir = parsePowerShellToken(rest);
+			if (dir === undefined) return UNRESOLVABLE_DISCARD_TARGET;
+			cdDirs.push(dir);
+			cdPendingSeparator = true;
+			continue;
+		}
+		// Any other statement cannot change the directory or select another
+		// repository, so ignore it exactly like the POSIX analyzer ignores non-cd
+		// segments.
+		cdPendingSeparator = false;
+	}
+	return { cdDirs, envAssignments };
+}
+
+/**
+ * Analyze a cmd.exe relocation chain (cd /d, set VAR=value) that runs before the
+ * discard. Refuses grouping and anything that cannot be replayed.
+ */
+function resolveCmdRelocation(
+	prefix: string,
+	userCommandStart: number,
+): ShellRelocation | typeof UNRESOLVABLE_DISCARD_TARGET {
+	// Parentheses group commands and make the applied directory unclear; refuse.
+	if (/[()]/.test(prefix)) return UNRESOLVABLE_DISCARD_TARGET;
+	const cdDirs: string[] = [];
+	const envAssignments: Array<{ name: string; value: string }> = [];
+	const parts = prefix.split(/(&&|\|\||&|\|)/);
+	let offset = 0;
+	let cdPendingSeparator = false;
+	for (const [index, part] of parts.entries()) {
+		const start = offset;
+		offset += part.length;
+		if (start < userCommandStart) continue; // command-prefix region: replayed as-is
+		if (part === "&&" || part === "||" || part === "&" || part === "|") {
+			if (part === "&" || part === "||" || part === "|") {
+				if (cdPendingSeparator) return UNRESOLVABLE_DISCARD_TARGET; // cd success not guaranteed
+				continue;
+			}
+			cdPendingSeparator = false;
+			continue;
+		}
+		const trimmed = part.trim();
+		if (!trimmed) {
+			cdPendingSeparator = false;
+			continue;
+		}
+		if (index === parts.length - 1) {
+			// The words abutting the git invocation must be replayable.
+			for (const token of trimmed.split(/\s+/).filter(Boolean)) {
+				if (token === "env" || token === "command" || token.endsWith("/") || token.endsWith("\\")) continue;
+				return UNRESOLVABLE_DISCARD_TARGET;
+			}
+			continue;
+		}
+		const quotedSet = /^set\s+"([A-Za-z_][A-Za-z0-9_]*)=([^"]*)"$/i.exec(trimmed);
+		const setMatch = quotedSet ?? /^set\s+([A-Za-z_][A-Za-z0-9_]*)=(\S+)$/i.exec(trimmed);
+		if (setMatch) {
+			const value = setMatch[2];
+			if (!isSafeCmdLiteral(value)) return UNRESOLVABLE_DISCARD_TARGET;
+			envAssignments.push({ name: setMatch[1], value });
+			cdPendingSeparator = false;
+			continue;
+		}
+		// pushd/popd change or restore the current directory and cannot be replayed.
+		if (/^(?:pushd|popd|push-location|pop-location)\b/i.test(trimmed)) return UNRESOLVABLE_DISCARD_TARGET;
+		const cd = /^(?:cd|chdir)\b(.*)$/i.exec(trimmed);
+		if (cd) {
+			let rest = cd[1].trim();
+			const drive = /^\/d\b\s*(.*)$/i.exec(rest);
+			if (drive) rest = drive[1].trim();
+			// A bare `cd` only prints the current directory, so it does not relocate.
+			const dir = rest ? parseCmdToken(rest) : undefined;
+			if (dir === undefined) return UNRESOLVABLE_DISCARD_TARGET;
+			cdDirs.push(dir);
+			cdPendingSeparator = true;
+			continue;
+		}
+		// Any other statement cannot relocate; ignore it.
+		cdPendingSeparator = false;
+	}
+	return { cdDirs, envAssignments };
+}
+
 export function resolveDiscardProbeTarget(
 	command: string,
 	discardIndex: number,
 	userCommandStart = 0,
+	shell: ShellKind = "posix",
 ): DiscardProbeTarget | typeof UNRESOLVABLE_DISCARD_TARGET | null {
 	const prefix = command.slice(0, discardIndex);
 	const invocation = command.slice(discardIndex);
@@ -366,101 +610,128 @@ export function resolveDiscardProbeTarget(
 		}
 	}
 
-	// Inline env assignments directly before the git invocation (for example
-	// GIT_DIR=.../GIT_WORK_TREE=... git reset --hard) relocate the target
-	// repository; replay them in the probe, or refuse when they cannot be.
-	let envPrefix = "";
-	const lastSegment = prefix.split(/&&|\|\||;|\||\n/).pop() ?? "";
-	const leadingTokens = lastSegment.trim().split(/\s+/).filter(Boolean);
-	for (const token of leadingTokens) {
-		if (/^[A-Za-z_][A-Za-z0-9_]*=[^\s$`;&|()<>"]+$/.test(token)) continue; // replayable assignment
-		// Wrappers that cannot change directory or select another repository.
-		if (token === "sudo" || token === "env" || token === "command" || token === "builtin" || token.endsWith("/")) {
-			continue;
+	// Inline env assignments and cd relocations apply before the discard. Their
+	// recognized syntax depends on the shell that actually runs the probe: POSIX
+	// uses `cd x &&` / `NAME=value`, PowerShell `Set-Location x;` / `$env:NAME=`,
+	// cmd.exe `cd /d "x" &&` / `set NAME=`.
+	let relocation: ShellRelocation;
+	if (shell === "posix") {
+		// Inline env assignments directly before the git invocation (for example
+		// GIT_DIR=.../GIT_WORK_TREE=... git reset --hard) relocate the target
+		// repository; replay them in the probe, or refuse when they cannot be.
+		const lastSegment = prefix.split(/&&|\|\||;|\||\n/).pop() ?? "";
+		const leadingTokens = lastSegment.trim().split(/\s+/).filter(Boolean);
+		for (const token of leadingTokens) {
+			if (/^[A-Za-z_][A-Za-z0-9_]*=[^\s$`;&|()<>"]+$/.test(token)) continue; // replayable assignment
+			// Wrappers that cannot change directory or select another repository.
+			if (token === "sudo" || token === "env" || token === "command" || token === "builtin" || token.endsWith("/")) {
+				continue;
+			}
+			return UNRESOLVABLE_DISCARD_TARGET;
 		}
-		return UNRESOLVABLE_DISCARD_TARGET;
-	}
-	const assignments = leadingTokens.filter((token) => token.includes("="));
-	if (assignments.length > 0) envPrefix = `${assignments.join(" ")} `;
+		const envAssignments = leadingTokens
+			.filter((token) => token.includes("="))
+			.map((token) => {
+				const separator = token.indexOf("=");
+				return { name: token.slice(0, separator), value: token.slice(separator + 1) };
+			});
 
-	// cd relocations earlier in the command. cds inside grouping parentheses or
-	// command substitutions do not persist: they only matter when the discard
-	// itself runs inside the still-open group, tracked via paren depth. Segments
-	// before userCommandStart belong to the configured command prefix, which the
-	// probe already replays verbatim, so their cds are not re-applied.
-	const persistentCdArgs: string[] = [];
-	const groupedCdArgs: string[] = [];
-	let sawCd = false;
-	let parenDepth = 0;
-	let cdPendingSeparator = false;
-	if (/\b(cd|pushd)\b/.test(prefix) || prefix.includes("(")) {
-		let offset = 0;
-		for (const part of prefix.split(/(&&|\|\||;|\||\n)/)) {
-			const start = offset;
-			offset += part.length;
-			if (start < userCommandStart) continue; // command-prefix region: replayed as-is
-			const separator = part === "&&" || part === "||" || part === ";" || part === "|" || part === "\n";
-			if (separator) {
-				if (cdPendingSeparator && (part === ";" || part === "\n")) {
-					// The discard's directory depends on the cd succeeding; refuse
-					// instead of probing only one of the two outcomes.
-					return UNRESOLVABLE_DISCARD_TARGET;
-				}
-				if (part === "||" || part === "|") {
-					if (sawCd) return UNRESOLVABLE_DISCARD_TARGET; // cd success no longer guaranteed
+		// cd relocations earlier in the command. cds inside grouping parentheses or
+		// command substitutions do not persist: they only matter when the discard
+		// itself runs inside the still-open group, tracked via paren depth. Segments
+		// before userCommandStart belong to the configured command prefix, which the
+		// probe already replays verbatim, so their cds are not re-applied.
+		const persistentCdArgs: string[] = [];
+		const groupedCdArgs: string[] = [];
+		let sawCd = false;
+		let parenDepth = 0;
+		let cdPendingSeparator = false;
+		if (/\b(cd|pushd)\b/.test(prefix) || prefix.includes("(")) {
+			let offset = 0;
+			for (const part of prefix.split(/(&&|\|\||;|\||\n)/)) {
+				const start = offset;
+				offset += part.length;
+				if (start < userCommandStart) continue; // command-prefix region: replayed as-is
+				const separator = part === "&&" || part === "||" || part === ";" || part === "|" || part === "\n";
+				if (separator) {
+					if (cdPendingSeparator && (part === ";" || part === "\n")) {
+						// The discard's directory depends on the cd succeeding; refuse
+						// instead of probing only one of the two outcomes.
+						return UNRESOLVABLE_DISCARD_TARGET;
+					}
+					if (part === "||" || part === "|") {
+						if (sawCd) return UNRESOLVABLE_DISCARD_TARGET; // cd success no longer guaranteed
+						continue;
+					}
+					cdPendingSeparator = false;
 					continue;
 				}
-				cdPendingSeparator = false;
-				continue;
-			}
-			const trimmed = part.trim();
-			const opens = part.match(/\(/g)?.length ?? 0;
-			const closes = part.match(/\)/g)?.length ?? 0;
-			const insideGroup = parenDepth > 0 || opens > 0;
-			parenDepth = Math.max(0, parenDepth + opens - closes);
-			if (insideGroup) {
-				const groupCd = /^cd\s*(.*)$/.exec(trimmed.replace(/^[(\s]+/, "").replace(/[)\s]+$/, ""));
-				if (groupCd) {
-					const arg = groupCd[1].trim();
-					if (!arg || /[$`;&|()<>#"]/.test(arg)) return UNRESOLVABLE_DISCARD_TARGET;
-					sawCd = true;
-					cdPendingSeparator = true;
-					groupedCdArgs.push(arg);
-				} else if (/\b(cd|pushd)\b/.test(trimmed)) {
-					return UNRESOLVABLE_DISCARD_TARGET; // group content we cannot replay
+				const trimmed = part.trim();
+				const opens = part.match(/\(/g)?.length ?? 0;
+				const closes = part.match(/\)/g)?.length ?? 0;
+				const insideGroup = parenDepth > 0 || opens > 0;
+				parenDepth = Math.max(0, parenDepth + opens - closes);
+				if (insideGroup) {
+					const groupCd = /^cd\s*(.*)$/.exec(trimmed.replace(/^[(\s]+/, "").replace(/[)\s]+$/, ""));
+					if (groupCd) {
+						const arg = groupCd[1].trim();
+						if (!arg || /[$`;&|()<>#"]/.test(arg)) return UNRESOLVABLE_DISCARD_TARGET;
+						sawCd = true;
+						cdPendingSeparator = true;
+						groupedCdArgs.push(arg);
+					} else if (/\b(cd|pushd)\b/.test(trimmed)) {
+						return UNRESOLVABLE_DISCARD_TARGET; // group content we cannot replay
+					}
+					// A closed group's cds do not persist and must not leak into a
+					// later still-open group's chain.
+					if (parenDepth === 0) groupedCdArgs.length = 0;
+					continue;
 				}
-				// A closed group's cds do not persist and must not leak into a
-				// later still-open group's chain.
-				if (parenDepth === 0) groupedCdArgs.length = 0;
-				continue;
+				if (trimmed === "pushd" || trimmed.startsWith("pushd ")) return UNRESOLVABLE_DISCARD_TARGET;
+				const cdMatch = /^cd\s*(.*)$/.exec(trimmed);
+				if (!cdMatch) {
+					cdPendingSeparator = false;
+					continue; // not a cd: cannot change cwd
+				}
+				const arg = cdMatch[1].trim();
+				// An arg we cannot replay safely (substitution, redirection, backgrounding,
+				// comments, or quotes split by segmenting) leaves the target repository
+				// unknown; refuse rather than probe blindly.
+				const balanced = (arg.match(/"/g)?.length ?? 0) % 2 === 0 && (arg.match(/'/g)?.length ?? 0) % 2 === 0;
+				if (!balanced || (arg && /[$`;&|()<>#]/.test(arg))) return UNRESOLVABLE_DISCARD_TARGET;
+				sawCd = true;
+				cdPendingSeparator = true;
+				persistentCdArgs.push(arg);
 			}
-			if (trimmed === "pushd" || trimmed.startsWith("pushd ")) return UNRESOLVABLE_DISCARD_TARGET;
-			const cdMatch = /^cd\s*(.*)$/.exec(trimmed);
-			if (!cdMatch) {
-				cdPendingSeparator = false;
-				continue; // not a cd: cannot change cwd
-			}
-			const arg = cdMatch[1].trim();
-			// An arg we cannot replay safely (substitution, redirection, backgrounding,
-			// comments, or quotes split by segmenting) leaves the target repository
-			// unknown; refuse rather than probe blindly.
-			const balanced = (arg.match(/"/g)?.length ?? 0) % 2 === 0 && (arg.match(/'/g)?.length ?? 0) % 2 === 0;
-			if (!balanced || (arg && /[$`;&|()<>#]/.test(arg))) return UNRESOLVABLE_DISCARD_TARGET;
-			sawCd = true;
-			cdPendingSeparator = true;
-			persistentCdArgs.push(arg);
 		}
+		// When the discard runs inside a still-open group, its directory is the
+		// persistent cd chain inherited by the group plus the group's own cds;
+		// otherwise only persistent cds apply.
+		relocation = {
+			cdDirs: parenDepth > 0 ? [...persistentCdArgs, ...groupedCdArgs] : persistentCdArgs,
+			envAssignments,
+		};
+	} else {
+		const resolved =
+			shell === "powershell"
+				? resolvePowerShellRelocation(prefix, userCommandStart)
+				: resolveCmdRelocation(prefix, userCommandStart);
+		if (resolved === UNRESOLVABLE_DISCARD_TARGET) return UNRESOLVABLE_DISCARD_TARGET;
+		relocation = resolved;
 	}
-	// When the discard runs inside a still-open group, its directory is the
-	// persistent cd chain inherited by the group plus the group's own cds;
-	// otherwise only persistent cds apply.
-	const cdArgs = parenDepth > 0 ? [...persistentCdArgs, ...groupedCdArgs] : persistentCdArgs;
 
-	if (cdArgs.length === 0 && dashCDir === undefined && !cleanRemovesIgnored && !envPrefix) return null;
+	if (
+		relocation.cdDirs.length === 0 &&
+		dashCDir === undefined &&
+		!cleanRemovesIgnored &&
+		relocation.envAssignments.length === 0
+	) {
+		return null;
+	}
 	const ignored = cleanRemovesIgnored ? " --ignored=matching" : "";
-	const cdPrefix = cdArgs.length > 0 ? `${cdArgs.map((arg) => (arg ? `cd ${arg}` : "cd")).join(" && ")} && ` : "";
+	const relocationPrefix = `${buildCdPrefix(shell, relocation.cdDirs)}${buildEnvPrefix(shell, relocation.envAssignments)}`;
 	return {
-		relocationPrefix: `${cdPrefix}${envPrefix}` || undefined,
+		relocationPrefix: relocationPrefix || undefined,
 		gitStatusCommand: `${dashCDir ? `git -C ${dashCDir} ` : "git "}status --porcelain --untracked-files=all${ignored}`,
 	};
 }
@@ -701,8 +972,11 @@ export function createBashToolDefinition(
 				const probes: Array<{ context: BashSpawnContext; includesIgnoredFiles: boolean }> = [];
 				const seenProbes = new Set<string>();
 				const userCommandStart = commandPrefix ? commandPrefix.length + 1 : 0;
+				// Build and analyze the probe in the syntax of the shell that actually
+				// runs the discard (POSIX, PowerShell, or cmd.exe), honoring shellPath.
+				const shellKind = guardShellKind(options?.shellPath);
 				for (const index of discardIndices) {
-					const target = resolveDiscardProbeTarget(resolvedCommand, index, userCommandStart);
+					const target = resolveDiscardProbeTarget(resolvedCommand, index, userCommandStart, shellKind);
 					if (target === UNRESOLVABLE_DISCARD_TARGET) {
 						throw new Error(formatRelocationRefusal());
 					}

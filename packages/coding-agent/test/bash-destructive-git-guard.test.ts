@@ -2,13 +2,14 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	BASH_DESTRUCTIVE_GIT_BYPASS_ENV,
 	type BashOperations,
 	createBashTool,
 	isDestructiveGitDiscardCommand,
 } from "../src/core/tools/bash.js";
+import * as shellModule from "../src/utils/shell.js";
 
 function runGit(cwd: string, ...args: string[]): void {
 	execFileSync("git", args, { cwd, stdio: ["ignore", "ignore", "pipe"] });
@@ -29,6 +30,29 @@ function initDirtyGitRepo(root: string): void {
 	writeFileSync(join(root, "tracked.txt"), "modified\n");
 	writeFileSync(join(root, "untracked.txt"), "uncommitted\n");
 }
+
+// The guard builds and analyzes the probe in the shell that actually runs the
+// command: Windows PowerShell on win32, a POSIX shell elsewhere.
+const IS_WINDOWS = process.platform === "win32";
+
+/** Pick the POSIX spelling off Windows and the Windows PowerShell spelling on win32. */
+function platformCommand(posix: string, windows: string): string {
+	return IS_WINDOWS ? windows : posix;
+}
+
+/** Relocation prefix that changes into `dir` before the discard. */
+function cdInto(dir: string): string {
+	return platformCommand(`cd ${dir} && `, `Set-Location -LiteralPath '${dir}'; `);
+}
+
+/**
+ * POSIX-only shell semantics with no Windows PowerShell 5.1 equivalent. These
+ * tests assert POSIX-only behavior: grouping parens scope a cd differently, and
+ * the POSIX analyzer refuses a cd joined by `;`/newline, whereas PowerShell
+ * replays sequential `;` because that mirrors the discard's own directory. The
+ * guard still refuses the unclear forms; only the POSIX expectations are skipped.
+ */
+const posixOnly = it.skipIf(IS_WINDOWS);
 
 describe("isDestructiveGitDiscardCommand", () => {
 	it.each([
@@ -122,6 +146,7 @@ describe("bash tool destructive-git dirty-tree guard", () => {
 	afterEach(() => {
 		delete process.env[BASH_DESTRUCTIVE_GIT_BYPASS_ENV];
 		rmSync(testDir, { recursive: true, force: true });
+		vi.restoreAllMocks();
 	});
 
 	it.each(["git checkout -- .", "git checkout .", "git clean -fd", "git reset --hard", "git restore ."])(
@@ -267,7 +292,7 @@ describe("bash tool destructive-git dirty-tree guard", () => {
 		initDirtyGitRepo(sub);
 		const bash = createBashTool(testDir);
 
-		const error = await bash.execute("guard-cd-dirty", { command: "cd sub && git reset --hard" }).then(
+		const error = await bash.execute("guard-cd-dirty", { command: `${cdInto("sub")}git reset --hard` }).then(
 			() => undefined,
 			(err: Error) => err,
 		);
@@ -299,7 +324,9 @@ describe("bash tool destructive-git dirty-tree guard", () => {
 		runGit(sub, "commit", "-m", "second");
 		const bash = createBashTool(testDir);
 
-		await expect(bash.execute("guard-cd-clean", { command: "cd sub && git reset --hard" })).resolves.toBeDefined();
+		await expect(
+			bash.execute("guard-cd-clean", { command: `${cdInto("sub")}git reset --hard` }),
+		).resolves.toBeDefined();
 	});
 
 	it("probes every discarded repository in multi-discard commands", async () => {
@@ -308,8 +335,15 @@ describe("bash tool destructive-git dirty-tree guard", () => {
 		initDirtyGitRepo(sub);
 		const bash = createBashTool(testDir);
 
+		// git checkout -- . fails open outside any repo; the relocated discard in the
+		// dirty nested repo is what must be caught.
 		await expect(
-			bash.execute("guard-multi-discard", { command: "git checkout -- . && cd sub && git reset --hard" }),
+			bash.execute("guard-multi-discard", {
+				command: platformCommand(
+					"git checkout -- . && cd sub && git reset --hard",
+					`git checkout -- .; ${cdInto("sub")}git reset --hard`,
+				),
+			}),
 		).rejects.toThrow(/Refusing to run this destructive git command/);
 	});
 
@@ -341,12 +375,10 @@ describe("bash tool destructive-git dirty-tree guard", () => {
 		};
 		const bash = createBashTool(testDir, { operations });
 
-		await bash.execute("guard-cd-chain", { command: "cd a && cd b && git checkout -- ." });
+		const command = `${cdInto("a")}${cdInto("b")}git checkout -- .`;
+		await bash.execute("guard-cd-chain", { command });
 
-		expect(calls).toEqual([
-			"cd a && cd b && git status --porcelain --untracked-files=all",
-			"cd a && cd b && git checkout -- .",
-		]);
+		expect(calls).toEqual([`${cdInto("a")}${cdInto("b")}git status --porcelain --untracked-files=all`, command]);
 	});
 
 	it("replays git -C in the probe", async () => {
@@ -470,7 +502,12 @@ describe("bash tool destructive-git dirty-tree guard", () => {
 		const bash = createBashTool(testDir);
 
 		const error = await bash
-			.execute("guard-git-dir", { command: "GIT_DIR=sub/.git GIT_WORK_TREE=sub git reset --hard" })
+			.execute("guard-git-dir", {
+				command: platformCommand(
+					"GIT_DIR=sub/.git GIT_WORK_TREE=sub git reset --hard",
+					"$env:GIT_DIR='sub/.git'; $env:GIT_WORK_TREE='sub'; git reset --hard",
+				),
+			})
 			.then(
 				() => undefined,
 				(err: Error) => err,
@@ -565,7 +602,8 @@ describe("bash tool destructive-git dirty-tree guard", () => {
 		expect(readModifiedTracked()).toBe("modified\n");
 	});
 
-	it("probes cd relocations followed by unrelated grouped segments", async () => {
+	// POSIX-only (grouping parens scope the cd differently in PowerShell).
+	posixOnly("probes cd relocations followed by unrelated grouped segments", async () => {
 		const sub = join(testDir, "sub");
 		mkdirSync(sub);
 		initDirtyGitRepo(sub);
@@ -583,7 +621,8 @@ describe("bash tool destructive-git dirty-tree guard", () => {
 		expect(readFileSync(join(sub, "tracked.txt"), "utf-8")).toBe("modified\n");
 	});
 
-	it("ignores cds in groups that close before the discard and probes the real directory", async () => {
+	// POSIX-only (POSIX subshell/group scoping has no PowerShell equivalent).
+	posixOnly("ignores cds in groups that close before the discard and probes the real directory", async () => {
 		initDirtyGitRepo(testDir);
 		const sub = join(testDir, "sub");
 		mkdirSync(sub);
@@ -606,7 +645,8 @@ describe("bash tool destructive-git dirty-tree guard", () => {
 		expect(readFileSync(join(sub, "tracked.txt"), "utf-8")).toBe("modified\n");
 	});
 
-	it("replays in-group cds when the discard runs inside the group", async () => {
+	// POSIX-only (POSIX grouping cannot be replayed in PowerShell).
+	posixOnly("replays in-group cds when the discard runs inside the group", async () => {
 		const sub = join(testDir, "sub");
 		mkdirSync(sub);
 		initDirtyGitRepo(sub);
@@ -622,7 +662,8 @@ describe("bash tool destructive-git dirty-tree guard", () => {
 		expect(readFileSync(join(sub, "tracked.txt"), "utf-8")).toBe("modified\n");
 	});
 
-	it("inherits persistent cds into open groups for the probe", async () => {
+	// POSIX-only (POSIX grouping cannot be replayed in PowerShell).
+	posixOnly("inherits persistent cds into open groups for the probe", async () => {
 		const nested = join(testDir, "sub", "nested");
 		mkdirSync(nested, { recursive: true });
 		initDirtyGitRepo(nested);
@@ -704,7 +745,8 @@ describe("bash tool destructive-git dirty-tree guard", () => {
 		expect(readModifiedTracked()).toBe("modified\n");
 	});
 
-	it("conservatively refuses cds joined to the discard by ; or a newline", async () => {
+	// POSIX-only (PowerShell replays sequential ;/newline and probes, instead of refusing as POSIX does).
+	posixOnly("conservatively refuses cds joined to the discard by ; or a newline", async () => {
 		const bash = createBashTool(testDir);
 
 		for (const command of ["cd /does/not/exist; git reset --hard", "cd sub\ngit reset --hard"]) {
@@ -780,7 +822,8 @@ describe("bash tool destructive-git dirty-tree guard", () => {
 		);
 	});
 
-	it("drops closed-group cds from later open groups' probe chains", async () => {
+	// POSIX-only (POSIX grouping cannot be replayed in PowerShell).
+	posixOnly("drops closed-group cds from later open groups' probe chains", async () => {
 		const calls: string[] = [];
 		const operations: BashOperations = {
 			exec: async (command, _cwd, _options) => {
@@ -808,6 +851,103 @@ describe("bash tool destructive-git dirty-tree guard", () => {
 		const bash = createBashTool(testDir, { operations });
 
 		await expect(bash.execute("guard-abort", { command: "git checkout -- ." })).rejects.toThrow("aborted");
+	});
+
+	it("builds a PowerShell relocation probe for Set-Location and $env: forms", async () => {
+		const calls: string[] = [];
+		const operations: BashOperations = {
+			exec: async (command, _cwd, _options) => {
+				calls.push(command);
+				return { exitCode: 0 };
+			},
+		};
+		vi.spyOn(shellModule, "getShellConfig").mockReturnValue({
+			shell: "powershell.exe",
+			args: ["-NoProfile", "-NonInteractive", "-Command"],
+			kind: "powershell",
+		});
+		const bash = createBashTool(testDir, { operations });
+
+		await bash.execute("guard-ps-probe-cd", { command: "Set-Location -LiteralPath 'sub'; git reset --hard" });
+		await bash.execute("guard-ps-probe-env", {
+			command: "$env:GIT_DIR='nested/.git'; $env:GIT_WORK_TREE='nested'; git reset --hard",
+		});
+
+		expect(calls).toEqual([
+			"Set-Location -LiteralPath 'sub'; git status --porcelain --untracked-files=all",
+			"Set-Location -LiteralPath 'sub'; git reset --hard",
+			"$env:GIT_DIR='nested/.git'; $env:GIT_WORK_TREE='nested'; git status --porcelain --untracked-files=all",
+			"$env:GIT_DIR='nested/.git'; $env:GIT_WORK_TREE='nested'; git reset --hard",
+		]);
+	});
+
+	it("builds a cmd.exe relocation probe for cd /d and set forms", async () => {
+		const calls: string[] = [];
+		const operations: BashOperations = {
+			exec: async (command, _cwd, _options) => {
+				calls.push(command);
+				return { exitCode: 0 };
+			},
+		};
+		vi.spyOn(shellModule, "getShellConfig").mockReturnValue({
+			shell: "cmd.exe",
+			args: ["/d", "/s", "/c"],
+			kind: "cmd",
+		});
+		const bash = createBashTool(testDir, { operations });
+
+		await bash.execute("guard-cmd-probe-cd", { command: 'cd /d "sub" && git reset --hard' });
+		await bash.execute("guard-cmd-probe-env", {
+			command: 'set "GIT_DIR=nested/.git" && set "GIT_WORK_TREE=nested" && git reset --hard',
+		});
+
+		expect(calls).toEqual([
+			'cd /d "sub" && git status --porcelain --untracked-files=all',
+			'cd /d "sub" && git reset --hard',
+			'set "GIT_DIR=nested/.git" && set "GIT_WORK_TREE=nested" && git status --porcelain --untracked-files=all',
+			'set "GIT_DIR=nested/.git" && set "GIT_WORK_TREE=nested" && git reset --hard',
+		]);
+	});
+
+	it("selects the probe syntax from an explicit shellPath", async () => {
+		const calls: string[] = [];
+		const operations: BashOperations = {
+			exec: async (command, _cwd, _options) => {
+				calls.push(command);
+				return { exitCode: 0 };
+			},
+		};
+		// An explicit shellPath overrides the platform default for probe syntax.
+		const bash = createBashTool(testDir, { shellPath: "powershell.exe", operations });
+
+		await bash.execute("guard-shellpath", { command: "Set-Location -LiteralPath 'sub'; git reset --hard" });
+
+		expect(calls).toEqual([
+			"Set-Location -LiteralPath 'sub'; git status --porcelain --untracked-files=all",
+			"Set-Location -LiteralPath 'sub'; git reset --hard",
+		]);
+	});
+
+	// Windows-only: only the Windows host ships Windows PowerShell 5.1, the shell
+	// that must run the Set-Location relocation probe for real.
+	it.skipIf(!IS_WINDOWS)("probes a PowerShell Set-Location relocation in the target repository", async () => {
+		const sub = join(testDir, "sub");
+		mkdirSync(sub);
+		initDirtyGitRepo(sub);
+		const bash = createBashTool(testDir);
+
+		const error = await bash
+			.execute("guard-powershell-cd", { command: "Set-Location -LiteralPath 'sub'; git reset --hard" })
+			.then(
+				() => undefined,
+				(err: Error) => err,
+			);
+
+		expect(error).toBeInstanceOf(Error);
+		const message = (error as Error).message;
+		expect(message).toMatch(/Refusing to run this destructive git command/);
+		expect(message).toContain("tracked.txt");
+		expect(readFileSync(join(sub, "tracked.txt"), "utf-8")).toBe("modified\n");
 	});
 
 	function readModifiedTracked(): string {
