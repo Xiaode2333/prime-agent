@@ -75,6 +75,7 @@ jobs:
         working-directory: packages/coding-agent
         run: >
           npx vitest --run
+          test/daemon-launch.test.ts
           test/kernel-bootstrap-windows.test.ts
           test/kernel-windows-process.test.ts
           test/kernel-bash-shell.test.ts
