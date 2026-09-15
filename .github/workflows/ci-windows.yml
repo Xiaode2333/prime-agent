@@ -41,8 +41,8 @@ jobs:
         run: npx tsgo --noEmit
 
       - name: Check the Windows installer
-        # Structural checks plus a real pwsh parse. check:installer is not used
-        # here: it drives install.sh through a POSIX `sh` harness.
+        # Structural checks plus a real Windows PowerShell parse. check:installer is
+        # not used here: it drives install.sh through a POSIX `sh` harness.
         run: npm run check:installer-ps1
 
       - name: Report lint differences (informational)
@@ -52,7 +52,7 @@ jobs:
   windows-tests:
     name: Windows tests
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -68,39 +68,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build
-        run: npm run build
-
-      - name: Run the Windows-compatible test files
+      - name: Run the full suite
+        # Same command as Linux `test:ci`: it prepares the Python kernel, then runs
+        # every test file except the process test, which upstream runs separately.
+        # Files whose fixtures are POSIX-only skip themselves on Windows.
         working-directory: packages/coding-agent
-        run: >
-          npx vitest --run
-          test/daemon-launch.test.ts
-          test/daemon-peer-transport.test.ts
-          test/daemon-routed-client.test.ts
-          test/daemon-agent-connection-reconnect-park.test.ts
-          test/proper-lockfile-compromise.test.ts
-          test/suite/regressions/6006-bundled-bedrock.test.ts
-          test/kernel-bootstrap-windows.test.ts
-          test/kernel-windows-process.test.ts
-          test/kernel-bash-shell.test.ts
-          test/tools.test.ts
-          test/tools-manager.test.ts
-          test/bash-destructive-git-guard.test.ts
-          test/bash-execution-width.test.ts
-          test/bash-close-hang-windows.test.ts
-          test/async-bash-completion.test.ts
-          test/edit-tool-legacy-input.test.ts
-          test/edit-tool-no-full-redraw.test.ts
-          test/exec.test.ts
-          test/shell-env.test.ts
-          test/child-process.test.ts
-          test/daemon-socket.test.ts
-          test/daemon-ps.test.ts
-          test/daemon-ps-format.test.ts
-          test/daemon-ps-windows-discovery.test.ts
-          test/secure-dir.test.ts
-          test/suite/agent-session-bash-persistence.test.ts
+        env:
+          DO_NOT_TRACK: "1"
+        run: npm run test:ci
 
   kernel-runtime-tests:
     name: Windows kernel runtime tests
