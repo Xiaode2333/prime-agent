@@ -113,7 +113,10 @@ describe("telemetry identity and transport", () => {
 			version: 1,
 			installationId: first,
 		});
-		expect(statSync(path).mode & 0o777).toBe(0o600);
+		if (process.platform !== "win32") {
+			// Mode bits are not access control on Windows; the ACL hardening covers it.
+			expect(statSync(path).mode & 0o777).toBe(0o600);
+		}
 	});
 
 	it("replaces invalid persisted installation state", () => {

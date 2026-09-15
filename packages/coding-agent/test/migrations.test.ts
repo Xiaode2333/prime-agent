@@ -165,7 +165,10 @@ describe("auth migration ordering", () => {
 
 		migrateAuthToAuthJson();
 
-		expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+		if (process.platform !== "win32") {
+			// Mode bits are not access control on Windows; the ACL hardening covers it.
+			expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+		}
 		expect(JSON.parse(readFileSync(settingsPath, "utf-8")).apiKeys).toBeUndefined();
 	});
 

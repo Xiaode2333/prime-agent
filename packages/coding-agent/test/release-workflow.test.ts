@@ -47,6 +47,21 @@ function requiresSuccess(job: Job): void {
 	}
 }
 
+/**
+ * Remove a temp directory, tolerating the Windows lock that follows a bash step:
+ * a spawned shim or the shell's own working directory can hold it for a while, and
+ * %TEMP% reclaims it afterwards, so only POSIX fails loudly.
+ */
+function removeTempDirectory(directory: string): void {
+	try {
+		rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+	} catch (error) {
+		if (process.platform !== "win32") {
+			throw error;
+		}
+	}
+}
+
 describe("release workflow signature gates", () => {
 	it("requires successful build and both native final validation jobs before publication", () => {
 		const validation = release.jobs["validate-macos"]!;
@@ -88,7 +103,12 @@ describe("release workflow signature gates", () => {
 		for (const write of writes) expect(publish.steps.indexOf(gate)).toBeLessThan(publish.steps.indexOf(write));
 	});
 
-	it.each([{ channels: ["production"] }, { channels: ["beta"] }, { channels: ["production", "beta"] }])(
+	// These run a bash step copied out of the release workflow with its POSIX tooling
+	// (`find` with an empty argument, GNU tar flags). Windows resolves find.exe and
+	// tar.exe from System32 instead, so the extracted step cannot run there.
+	it
+		.skipIf(process.platform === "win32")
+		.each([{ channels: ["production"] }, { channels: ["beta"] }, { channels: ["production", "beta"] }])(
 		"finds the downloaded manifests when publishing $channels",
 		({ channels }) => {
 			const validation = release.jobs["validate-macos"]!;
@@ -141,7 +161,7 @@ ${step(validation, "Verify and exercise exact final Mac archives").run}`,
 					),
 				);
 			} finally {
-				rmSync(directory, { recursive: true, force: true });
+				removeTempDirectory(directory);
 			}
 		},
 	);
@@ -208,7 +228,7 @@ ${step(validation, "Verify and exercise exact final Mac archives").run}`,
 				}
 				expect(release.jobs.publish!.if).toBe("github.event_name != 'pull_request'");
 			} finally {
-				rmSync(directory, { recursive: true, force: true });
+				removeTempDirectory(directory);
 			}
 		},
 	);
