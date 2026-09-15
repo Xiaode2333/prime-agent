@@ -13,6 +13,7 @@ import {
 import { createDaemonSessionTransport, DaemonRoutedClient } from "../src/modes/daemon/daemon-routed-client.js";
 import { getDaemonSocketIdentity } from "../src/modes/daemon/daemon-socket.js";
 import { DaemonWorkerClient } from "../src/modes/daemon/daemon-worker-client.js";
+import { testSocketPath } from "./socket-path.js";
 
 const HELLO = {
 	type: "daemon_hello",
@@ -75,7 +76,7 @@ describe("createDaemonSessionTransport", () => {
 
 	it("falls back to the supervisor when the worker socket identity does not match the ticket", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-agent-routed-ticket-"));
-		const socketPath = join(directory, "worker.sock");
+		const socketPath = testSocketPath(directory, "worker.sock");
 		const server = createServer();
 		await new Promise<void>((resolveListen) => server.listen(socketPath, resolveListen));
 		try {

@@ -76,6 +76,11 @@ jobs:
         run: >
           npx vitest --run
           test/daemon-launch.test.ts
+          test/daemon-peer-transport.test.ts
+          test/daemon-routed-client.test.ts
+          test/daemon-agent-connection-reconnect-park.test.ts
+          test/proper-lockfile-compromise.test.ts
+          test/suite/regressions/6006-bundled-bedrock.test.ts
           test/kernel-bootstrap-windows.test.ts
           test/kernel-windows-process.test.ts
           test/kernel-bash-shell.test.ts

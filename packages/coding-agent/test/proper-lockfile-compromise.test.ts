@@ -33,6 +33,7 @@ import {
 	prepareDaemonSocketPath,
 } from "../src/modes/daemon/daemon-socket.js";
 import { acquireDaemonSupervisorOwnership } from "../src/modes/daemon/daemon-supervisor-ownership.js";
+import { testSocketPath } from "./socket-path.js";
 
 const tempDirs: string[] = [];
 
@@ -54,20 +55,26 @@ function tempDir(prefix: string): string {
 }
 
 describe("proper-lockfile compromise boundaries", () => {
-	it("records a socket lease compromise and fails before preparing the socket", async () => {
-		lockState.compromiseAsync = true;
-		const socketPath = join(tempDir("pa-lock-socket-"), "daemon.sock");
-		const lease = await acquireDaemonSocketPathLease(socketPath);
+	// A socket path lease guards a filesystem socket. `acquireDaemonSocketPathLease` returns
+	// undefined on win32 by design, because a named pipe has no path to lease, so this
+	// compromise path has no Windows equivalent to assert against.
+	it.skipIf(process.platform === "win32")(
+		"records a socket lease compromise and fails before preparing the socket",
+		async () => {
+			lockState.compromiseAsync = true;
+			const socketPath = testSocketPath(tempDir("pa-lock-socket-"), "daemon.sock");
+			const lease = await acquireDaemonSocketPathLease(socketPath);
 
-		expect(lease?.compromise?.message).toBe("async lock compromised");
-		await expect(prepareDaemonSocketPath(socketPath, lease)).rejects.toThrow(/was compromised/);
-	});
+			expect(lease?.compromise?.message).toBe("async lock compromised");
+			await expect(prepareDaemonSocketPath(socketPath, lease)).rejects.toThrow(/was compromised/);
+		},
+	);
 
 	it.skipIf(process.platform === "win32")(
 		"does not unlink a socket when the cleanup guard is compromised",
 		async () => {
 			lockState.compromiseSync = true;
-			const socketPath = join(tempDir("pa-lock-cleanup-"), "daemon.sock");
+			const socketPath = testSocketPath(tempDir("pa-lock-cleanup-"), "daemon.sock");
 			const server = createServer();
 			try {
 				await new Promise<void>((resolve) => server.listen(socketPath, resolve));

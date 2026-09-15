@@ -14,6 +14,7 @@ import { DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
 import { DAEMON_PROTOCOL_VERSION } from "../../../src/modes/daemon/daemon-protocol.js";
 import { isProcessAlive } from "../../../src/utils/child-process.js";
 import { killProcessTree } from "../../../src/utils/shell.js";
+import { testSocketPath } from "../../socket-path.js";
 import { createHarness, getAssistantTexts, type Harness } from "../harness.js";
 
 const run = promisify(execFile);
@@ -103,7 +104,7 @@ describe("ENG-6006 bundled Bedrock provider", () => {
 		server = createServer();
 		const fixtureServer = server;
 		await new Promise<void>((done) => fixtureServer.listen(0, "127.0.0.1", done));
-		socketPath = join(tempDir, "unresponsive.sock");
+		socketPath = testSocketPath(tempDir, "unresponsive.sock");
 		const child = spawn(
 			process.execPath,
 			[
@@ -218,7 +219,7 @@ registerHooks({
 			join(harness.tempDir, "models.json"),
 			JSON.stringify({ providers: { "amazon-bedrock": { baseUrl: `http://127.0.0.1:${address.port}` } } }),
 		);
-		socketPath = join(harness.tempDir, "d.sock");
+		socketPath = testSocketPath(harness.tempDir, "d.sock");
 		const pending = run(
 			process.execPath,
 			[

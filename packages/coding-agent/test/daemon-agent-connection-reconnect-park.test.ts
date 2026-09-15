@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
+import { testSocketPath } from "./socket-path.js";
 
 const tempDirs: string[] = [];
 const servers: Server[] = [];
@@ -110,7 +111,7 @@ describe("daemon agent connection reconnect parking", () => {
 	it("reconnect loop survives cuts mid-attach and mid-snapshot instead of parking its own requests", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-reconnect-park-"));
 		tempDirs.push(directory);
-		const socketPath = join(directory, "daemon.sock");
+		const socketPath = testSocketPath(directory, "daemon.sock");
 		const { sockets } = await startScriptedDaemon(socketPath, [
 			respondAll(),
 			// Cut mid-attach: unfixed, the request parks behind a hello only this stuck loop could produce.
@@ -139,7 +140,7 @@ describe("daemon agent connection reconnect parking", () => {
 	it("update-restart restore survives cuts mid-list, mid-attach, and mid-snapshot instead of parking", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-update-park-"));
 		tempDirs.push(directory);
-		const socketPath = join(directory, "daemon.sock");
+		const socketPath = testSocketPath(directory, "daemon.sock");
 		const { sockets } = await startScriptedDaemon(socketPath, [
 			respondAll(),
 			respondAll(["list"]),

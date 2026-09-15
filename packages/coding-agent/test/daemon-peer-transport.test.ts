@@ -10,6 +10,7 @@ import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import type { DaemonWorkerCommand, DaemonWorkerPeerGrant } from "../src/modes/daemon/daemon-worker-protocol.js";
+import { testSocketPath } from "./socket-path.js";
 
 interface WorkerInternals {
 	handleLine(client: DaemonSocketClient, line: string): Promise<void>;
@@ -377,7 +378,7 @@ describe("supervisor direct transport issuance", () => {
 
 	it("issues a dev/ino-bound single-use ticket only after the worker accepted the grant", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-agent-peer-ticket-"));
-		const socketPath = join(directory, "worker.sock");
+		const socketPath = testSocketPath(directory, "worker.sock");
 		const server = createServer();
 		await new Promise<void>((resolveListen) => server.listen(socketPath, resolveListen));
 		try {
