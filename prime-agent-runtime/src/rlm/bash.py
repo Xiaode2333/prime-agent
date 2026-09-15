@@ -1161,9 +1161,25 @@ def _windows_shell_command(shell: str, command: str) -> _WindowsCommand:
     marker = _WIN_COMPLETION_PREFIX + secrets.token_hex(32).encode("ascii")
     token = marker[len(_WIN_COMPLETION_PREFIX) :].decode("ascii")
     if kind == "powershell":
-        wrapped = _powershell_wrapper(command, token)
+        # A script file, not -Command text: under -Command, PowerShell repeats the
+        # wrapper statements in a cmdlet error's context, so probe internals reach
+        # the user's output. From a file the error names the user's own line only.
+        # -File honours the execution policy, so bypass it explicitly.
+        path = _write_powershell_wrapper(_powershell_wrapper(command, token))
         return _WindowsCommand(
-            [shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", wrapped], True, marker
+            [
+                shell,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                path,
+            ],
+            True,
+            marker,
+            os.path.dirname(path),
         )
     path = _write_batch_wrapper(_cmd_wrapper(command, token))
     # /d /c, not the shell tool's /d /s /c: /s strips the quoting list2cmdline
@@ -1197,6 +1213,20 @@ def _write_batch_wrapper(text: str) -> str:
     return path
 
 
+def _write_powershell_wrapper(text: str) -> str:
+    """Write a PowerShell wrapper to a private temp script and return its path.
+
+    Windows PowerShell 5.1 reads a .ps1 without a BOM in the ANSI code page, so
+    write UTF-8 with a BOM to keep non-ASCII command text intact. The directory is
+    removed when the handle is reaped, like the cmd.exe wrapper.
+    """
+    directory = tempfile.mkdtemp(prefix="prime-agent-ps-")
+    path = os.path.join(directory, "command.ps1")
+    with open(path, "w", encoding="utf-8-sig", errors="replace", newline="") as handle:
+        handle.write(text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n"))
+    return path
+
+
 def _parse_stream_status(raw: bytes) -> int | None:
     # The wrapper writes one space then the status: "3", "-1"; cmd.exe adds CRLF.
     try:
@@ -1223,16 +1253,37 @@ def _powershell_wrapper(command: str, token: str) -> str:
     the status to the process exit code. Non-ASCII output is decoded as UTF-8 by
     the buffer while PowerShell encodes with the console code page, exactly as the
     coding-agent shell tool already does.
+
+    Error-context hygiene (the user's statement is the only thing an error may
+    show): nothing precedes the user's command, so its own line numbers are exact
+    (verified: `Get-Item C:\nope` on line 2 reports "At line:2"); the first
+    statement after it is a bare `;`, so a command that ends on an unterminated
+    token (a trailing `|`, `,` or backtick) parses its error against the user's
+    own text instead of against a wrapper statement, and cannot glue wrapper
+    statements into its own output. The probes themselves are exception-proof: the
+    native exit code counts only when it converts, so a user-set non-numeric
+    `$LASTEXITCODE` falls back to `$?` instead of aborting the status line, and the
+    status is interpolated as a string instead of calling .ToString() on a possibly
+    null value. The marker is assembled from two halves, so the wrapper's own text
+    (which rides in the process command line, readable by the command through
+    [Environment]::CommandLine) never contains the contiguous fence bytes the pump
+    matches on.
     """
+    midpoint = len(token) // 2
     return (
-        "$global:LASTEXITCODE = $null\n"
         f"{command}\n"
+        ";\n"  # Terminates a trailing unterminated token as an empty statement.
         "$__prime_ok = $?\n"
         "$__prime_code = $LASTEXITCODE\n"
-        "$__prime_status = if ($null -ne $__prime_code) { [int]$__prime_code } "
-        "elseif ($__prime_ok) { 0 } else { 1 }\n"
-        f"[Console]::Out.Write('{_WIN_COMPLETION_PREFIX.decode()}{token} ' "
-        '+ $__prime_status.ToString() + "`n")\n'
+        "$__prime_status = 1\n"
+        # A native exit code counts only when it converts; a value the command left
+        # behind that cannot convert falls back to $? instead of aborting the line.
+        "try { if ($null -ne $__prime_code) { $__prime_status = [int]$__prime_code } } "
+        "catch { $__prime_code = $null }\n"
+        "if ($null -eq $__prime_code) { $__prime_status = if ($__prime_ok) { 0 } else { 1 } }\n"
+        f"$__prime_fence = '{_WIN_COMPLETION_PREFIX.decode()}{token[:midpoint]}'\n"
+        f"$__prime_fence += '{token[midpoint:]} ' + \"$__prime_status\"\n"
+        '[Console]::Out.Write($__prime_fence + "`n")\n'
         "[Console]::Out.Flush()\n"
         # Parity with the POSIX script's trailing `wait`: PowerShell background jobs
         # keep the shell (and its job-contained tree) alive past the fence.
@@ -1248,13 +1299,20 @@ def _cmd_wrapper(command: str, token: str) -> str:
     cmd.exe has no `$?`/`$LASTEXITCODE`: ERRORLEVEL after the command is its exit
     status, so the wrapper captures it before its own `echo` statements can
     overwrite it and re-exits with the same code. `&` keeps cmd's meaning (a
-    command separator), so background work needs `start /b <cmd>`.
+    command separator), so background work needs `start /b <cmd>`. The marker is
+    assembled from two halves for the same reason as the PowerShell wrapper: this
+    batch file's path is on the child's command line, so a command that runs
+    `type <batch file>` must not read the contiguous fence bytes back out.
     """
+    midpoint = len(token) // 2
+    prefix = _WIN_COMPLETION_PREFIX.decode()
     return (
         "@echo off\n"
         f"{command}\n"
         'set "__prime_status=%ERRORLEVEL%"\n'
-        f"echo {_WIN_COMPLETION_PREFIX.decode()}{token} %__prime_status%\n"
+        f'set "__prime_fence={prefix}{token[:midpoint]}"\n'
+        f'set "__prime_fence=%__prime_fence%{token[midpoint:]} %__prime_status%"\n'
+        "echo %__prime_fence%\n"
         "exit /b %__prime_status%\n"
     )
 

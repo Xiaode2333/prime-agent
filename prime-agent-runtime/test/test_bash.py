@@ -26,12 +26,93 @@ from rlm import bash
 # module through sys.modules for internals.
 bash_module = sys.modules["rlm.bash"]
 
+# Windows has no signal.SIGKILL; its kill() path ignores the signal and
+# terminates the job object, so the plain SIGTERM default crosses platforms.
+_HARD_KILL = getattr(signal, "SIGKILL", signal.SIGTERM)
+# The fence line is protocol, never user output, on either platform.
+_WIN_FENCE = bash_module._WIN_COMPLETION_PREFIX.decode()
+_POSIX_ONLY = unittest.skipIf(
+    os.name != "posix", "POSIX process-group/signal semantics: Windows uses a kill-on-close job object"
+)
+
+
+def _shell_uses_posix_syntax() -> bool:
+    """Whether bash() will run command text through a POSIX shell on this host.
+
+    POSIX CI always does; on Windows only an explicit POSIX-shell override does,
+    so a test command written in `sh` syntax must be POSIX-only while the shipped
+    Windows shells (PowerShell, cmd.exe) need their own form.
+    """
+    try:
+        return bash_module._shell_kind(bash_module._shell()) == "posix"
+    except (ValueError, RuntimeError):
+        return True
+
+
+def _shell_command(posix: str, powershell: str) -> str:
+    """Command text for the shell bash() selects on this host.
+
+    Windows has no POSIX shell: the same assertion needs the PowerShell spelling
+    of the command (`$env:VAR`, `[Console]::Out.Write`, `Start-Sleep`).
+    """
+    if os.name != "nt" or _shell_uses_posix_syntax():
+        return posix
+    return powershell
+
+
+def _terminate_shell(handle: "bash_module.BashHandle") -> None:
+    """Kill the shell process without touching the handle API on POSIX.
+
+    Windows has no per-process signal: kill() terminates the job object, which is
+    the platform's equivalent of killing the shell's process group.
+    """
+    if os.name == "posix":
+        os.kill(handle.pid, signal.SIGTERM)
+    else:
+        handle.kill()
+
+
+def _group_dead(pgid: int) -> bool:
+    """POSIX-only group liveness probe; Windows has no process groups."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        pass
+    return False
+
+
+def _group_alive(handle: "bash_module.BashHandle") -> bool:
+    """Group liveness for the running command.
+
+    POSIX asks the kernel for the process group; Windows has none, so the
+    handle's own view (running == the job object still holds members) is the
+    platform equivalent.
+    """
+    if os.name != "posix":
+        return handle.running
+    return not _group_dead(handle._pid)
+
 
 def _win_spawn(procs=None, resume=True):
-    # POSIX stand-in for _winjob.spawn_in_job: a real Popen plus a resume() mock (Ubuntu CI).
+    # Stand-in for _winjob.spawn_in_job: a real Popen plus a resume() mock. The
+    # mocked Win32 boundary needs a real pid/wait()/stdout pipe, but the argv the
+    # handle passes (a POSIX `[sh, -c, cmd]` override) is not runnable on Windows,
+    # so there the stand-in runs the same command text through the shipped
+    # PowerShell instead. Nothing under test asserts on the stand-in's own output:
+    # the tests assert on the argv, the journal order and the job-object mocks.
     def spawn_in_job(job, argv, cwd, env):
+        requested = list(argv)  # what the handle asked for: what the tests assert on
+        runner = argv
+        if os.name == "nt":
+            runner = [
+                os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32",
+                             "WindowsPowerShell", "v1.0", "powershell.exe"),
+                "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", argv[-1],
+            ]
         proc = subprocess.Popen(
-            argv,
+            runner,
             cwd=cwd,
             env=env,
             stdout=subprocess.PIPE,
@@ -41,7 +122,7 @@ def _win_spawn(procs=None, resume=True):
         proc.resume = mock.Mock(return_value=resume)
         proc.close = mock.Mock()
         proc.spawn_job = job
-        proc.spawn_argv = argv
+        proc.spawn_argv = requested
         if procs is not None:
             procs.append(proc)
         return proc
@@ -119,6 +200,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         result = await asyncio.wait_for(handle, timeout=5)
         self.assertNotEqual(result.exit_code, 0)
 
+    @_POSIX_ONLY  # Windows kills the job object outright: no signal means no TERM trap to escalate past
     async def test_kill_escalates_to_sigkill(self):
         handle = bash("trap '' TERM; echo up; sleep 30")
         for _ in range(100):
@@ -130,11 +212,16 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.exit_code, -9)
 
     async def test_buffer_cap_keeps_head_and_tail(self):
-        result = await bash("seq 1 400000")
+        result = await bash(
+            _shell_command("seq 1 400000", "[Console]::Out.Write((1..400000) -join [char]10)")
+        )
         self.assertLessEqual(len(result.output), 2 * 1024 * 1024 + 256)
         self.assertTrue(result.output.startswith("1\n"))
         self.assertIn("400000", result.output)
         self.assertIn("bytes dropped", result.output)
+        # The fence line is protocol: even under this load it never lands in output.
+        self.assertNotIn(_WIN_FENCE, result.output)
+        self.assertNotIn(bash_module._COMPLETION_PREFIX.decode(), result.output)
 
     def test_child_env_is_non_interactive(self):
         """Agent shells have no usable stdin: interactive prompts (git commit
@@ -164,7 +251,11 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_spawned_shell_receives_non_interactive_env(self):
         handle = bash(
-            'echo "$GIT_EDITOR|$GIT_SEQUENCE_EDITOR|$GIT_TERMINAL_PROMPTS|$GIT_ASKPASS|$SSH_ASKPASS_REQUIRE"'
+            _shell_command(
+                'echo "$GIT_EDITOR|$GIT_SEQUENCE_EDITOR|$GIT_TERMINAL_PROMPTS|$GIT_ASKPASS|$SSH_ASKPASS_REQUIRE"',
+                'Write-Output "$env:GIT_EDITOR|$env:GIT_SEQUENCE_EDITOR|$env:GIT_TERMINAL_PROMPTS'
+                '|$env:GIT_ASKPASS|$env:SSH_ASKPASS_REQUIRE"',
+            )
         )
         result = await handle
         self.assertEqual(result.exit_code, 0)
@@ -176,12 +267,16 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "PRIME_AGENT_BASH_COMMAND_PREFIX": "echo prefixed",
+                    "PRIME_AGENT_BASH_COMMAND_PREFIX": _shell_command(
+                        "echo prefixed", "Write-Output prefixed"
+                    ),
                     "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
                     "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
                 },
             ):
-                handle = bash('echo "$NO_COLOR $TERM"')
+                handle = bash(
+                    _shell_command('echo "$NO_COLOR $TERM"', 'Write-Output "$env:NO_COLOR $env:TERM"')
+                )
                 result = await handle
                 # The inactive record lands slightly after finalize, once the group exits.
                 records = await _poll_journal(journal, count=2)
@@ -195,8 +290,10 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(record["pid"], handle.pid)
                 self.assertEqual(record["ownerPid"], os.getpid())
                 self.assertEqual(record["kernelPid"], os.getpid())
-            self.assertTrue(records[0]["processStartId"].startswith(("proc:", "ps:")))
+            # The identity string is per-platform: /proc, ps on macOS, Windows ticks.
+            self.assertTrue(records[0]["processStartId"].startswith(("proc:", "ps:", "win:")))
 
+    @_POSIX_ONLY  # POSIX `&` backgrounding plus a process group as the journal anchor
     async def test_await_returns_when_shell_backgrounds_child(self):
         with tempfile.TemporaryDirectory() as tmp:
             journal = os.path.join(tmp, "journal.jsonl")
@@ -219,6 +316,9 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 records = await _poll_journal(journal, count=2)
             self.assertFalse(records[-1]["active"])
 
+    # POSIX `&` plus process-group kill; the Windows detached-grandchild analogue is
+    # test_bash_windows.test_exit_before_marker_with_detached_grandchild_still_returns.
+    @_POSIX_ONLY
     async def test_early_shell_exit_returns_and_kills_group(self):
         handle = bash("sleep 30 & exit 7")
         result = await asyncio.wait_for(handle, timeout=5)
@@ -226,6 +326,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         # The leader died without draining, so the stale group must be killed.
         await _poll_group_dead(handle.pid)
 
+    @_POSIX_ONLY  # a TERM-ignoring child only exists where signals exist
     async def test_term_ignoring_child_is_escalated(self):
         with tempfile.TemporaryDirectory() as tmp:
             journal = os.path.join(tmp, "journal.jsonl")
@@ -261,11 +362,16 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(
             bash_module.BashHandle, "_wait_for_completion", held_completion
         ):
-            # Background job keeps the shell alive in `wait` after status 0 is delivered.
-            handle = bash("sleep 30 & true")
+            # Background work keeps the shell alive past the fence: POSIX `&`, or a
+            # PowerShell job the wrapper's trailing Wait-Job then waits for.
+            handle = bash(
+                _shell_command(
+                    "sleep 30 & true", "Start-Job { Start-Sleep -Seconds 30 } | Out-Null"
+                )
+            )
             try:
                 self.assertTrue(await asyncio.to_thread(entered.wait, 5))
-                os.kill(handle.pid, signal.SIGTERM)
+                _terminate_shell(handle)
                 # _watch must fully finish its finalize decision while _report is held.
                 for _ in range(200):
                     with bash_module._live_lock:
@@ -293,11 +399,16 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             return status
 
         with mock.patch.object(bash_module.BashHandle, "_read_status", slow_read):
-            # Background job keeps the shell alive in `wait` after status 0 is written.
-            handle = bash("sleep 30 & true")
+            # Background work keeps the shell alive past the fence: POSIX `&`, or a
+            # PowerShell job the wrapper's trailing Wait-Job then waits for.
+            handle = bash(
+                _shell_command(
+                    "sleep 30 & true", "Start-Job { Start-Sleep -Seconds 30 } | Out-Null"
+                )
+            )
             try:
                 self.assertTrue(await asyncio.to_thread(parsed.wait, 5))
-                os.kill(handle.pid, signal.SIGTERM)
+                _terminate_shell(handle)
                 # Outlast the old timeout so a timed wait would have finalized -15.
                 await asyncio.sleep(1.5)
                 self.assertIsNone(handle.poll())
@@ -352,6 +463,10 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(text.endswith("b" * 1000))
         self.assertIn("a" * 1000 + "b" * 1000, text)
 
+    # `running` is group liveness here, which POSIX defines through the process group;
+    # the Windows job-object analogue is test_bash_windows.test_background_handle_api
+    # plus test_exit_before_marker_with_detached_grandchild_still_returns.
+    @_POSIX_ONLY
     async def test_running_reflects_group_liveness(self):
         handle = bash("echo fg; sleep 30 &")
         result = await asyncio.wait_for(handle, timeout=5)
@@ -399,7 +514,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                         handle.kill()
                     proc_kill.assert_called_once()
         finally:
-            handle.kill(signal.SIGKILL)
+            handle.kill(_HARD_KILL)
             await asyncio.wait_for(handle, timeout=5)
 
     def test_gate_eof_without_journal_prevents_command_execution(self):
@@ -481,7 +596,13 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 pids.append(handle_self._pid)
 
             async def run_oneshot():
-                await bash(f"sleep 1.0 && touch {marker}")
+                await bash(
+                    _shell_command(
+                        f"sleep 1.0 && touch {marker}",
+                        f"Start-Sleep -Seconds 1; New-Item -ItemType File -Path '{marker}'"
+                        " | Out-Null",
+                    )
+                )
 
             with mock.patch.object(bash_module.BashHandle, "__init__", capturing_init):
                 task = asyncio.ensure_future(run_oneshot())
@@ -496,6 +617,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(1.0)
             self.assertFalse(os.path.exists(marker))
 
+    @_POSIX_ONLY  # a TERM trap forcing SIGKILL escalation exists only where signals do
     async def test_cancelled_direct_await_escalates_past_term_trap(self):
         # A TERM-trapping command must be group-KILLed before the cancel
         # resolves, so its later side effects never land.
@@ -540,9 +662,9 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             await task
         handle = handles[0]
         try:
-            os.killpg(handle._pid, 0)  # still alive
+            self.assertTrue(_group_alive(handle))  # still alive after the cancel
         finally:
-            handle.kill(signal.SIGKILL)
+            handle.kill(_HARD_KILL)
         await asyncio.wait_for(handle, timeout=5)
 
     async def test_cancelling_await_on_released_handle_does_not_kill(self):
@@ -558,9 +680,9 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await task
         try:
-            os.killpg(handle._pid, 0)  # still alive
+            self.assertTrue(_group_alive(handle))  # still alive after the cancel
         finally:
-            handle.kill(signal.SIGKILL)
+            handle.kill(_HARD_KILL)
         await asyncio.wait_for(handle, timeout=5)
 
     async def test_second_await_after_cancelled_oneshot_only_waits(self):
@@ -572,6 +694,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         again = await handle
         self.assertEqual(again, result)
 
+    @_POSIX_ONLY  # asserts os.killpg-confirmed group death; Windows terminates a job object
     async def test_second_cancel_during_cleanup_still_confirms_group_death(self):
         # Python 3.11: an await inside an except-CancelledError block of a
         # cancelled task is re-cancelled immediately; the shielded confirm task
@@ -662,13 +785,29 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             original_write(buffer_self, chunk)
 
         with mock.patch.object(bash_module._BoundedBuffer, "write", delayed_write):
-            result = await asyncio.wait_for(bash("printf delayed-output-complete"), timeout=5)
+            result = await asyncio.wait_for(
+                bash(
+                    _shell_command(
+                        "printf delayed-output-complete",
+                        "[Console]::Out.Write('delayed-output-complete')",
+                    )
+                ),
+                timeout=5,
+            )
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(result.output, "delayed-output-complete")
 
     async def test_completion_marker_split_across_reads_is_removed(self):
         with mock.patch.object(bash_module, "_READ_CHUNK", 7):
-            result = await asyncio.wait_for(bash("printf exact-pre-fence-output"), timeout=5)
+            result = await asyncio.wait_for(
+                bash(
+                    _shell_command(
+                        "printf exact-pre-fence-output",
+                        "[Console]::Out.Write('exact-pre-fence-output')",
+                    )
+                ),
+                timeout=5,
+            )
         self.assertEqual(result.output, "exact-pre-fence-output")
 
     async def test_slow_pump_does_not_lose_foreground_output(self):
@@ -680,24 +819,44 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             original_pump(handle_self)
 
         with mock.patch.object(bash_module.BashHandle, "_pump", slow_pump):
-            result = await asyncio.wait_for(bash("printf slow-pump-x"), timeout=5)
+            result = await asyncio.wait_for(
+                bash(
+                    _shell_command(
+                        "printf slow-pump-x", "[Console]::Out.Write('slow-pump-x')"
+                    )
+                ),
+                timeout=5,
+            )
         self.assertEqual(result.exit_code, 0)
         self.assertIn("slow-pump-x", result.output)
 
     async def test_sentinel_like_output_and_echoed_wrapper_do_not_truncate(self):
         token = "0123456789abcdef" * 4
         raw_lookalike = "\x1eprime-agent-complete:not-this-invocation\x1f"
-        command = (
+        # POSIX echoes its own running script with `set -x` and reads its cmdline;
+        # PowerShell echoes nothing, so the Windows form prints the process command
+        # line that carries the wrapper text ([Environment]::CommandLine).
+        command = _shell_command(
             "set -x\n"
             "printf '\\036prime-agent-complete:not-this-invocation\\037'\n"
             "if [ -r /proc/$$/cmdline ]; then cat /proc/$$/cmdline; fi\n"
-            "printf '\\nafter-sentinel-lookalike\\n'"
+            "printf '\\nafter-sentinel-lookalike\\n'",
+            "$lookalike = [char]30 + 'prime-agent-complete:not-this-invocation' + [char]31\n"
+            "[Console]::Out.Write($lookalike)\n"
+            "[Console]::Out.Write([Environment]::CommandLine)\n"
+            "[Console]::Out.Write(\"`nafter-sentinel-lookalike`n\")",
         )
         with mock.patch.object(bash_module.secrets, "token_hex", return_value=token):
             result = await asyncio.wait_for(bash(command), timeout=5)
-        actual_marker = (
-            bash_module._COMPLETION_PREFIX + token.encode() + bash_module._COMPLETION_SUFFIX
-        )
+        if _shell_uses_posix_syntax():
+            actual_marker: bytes = (
+                bash_module._COMPLETION_PREFIX + token.encode() + bash_module._COMPLETION_SUFFIX
+            )
+        else:
+            # The Windows channel carries the marker as bare ASCII (no framing byte);
+            # both wrappers assemble it from halves so the wrapper's own text, which
+            # rides in the child's command line, never holds the contiguous fence.
+            actual_marker = bash_module._WIN_COMPLETION_PREFIX + token.encode()
         self.assertIn(raw_lookalike, result.output)
         self.assertIn("after-sentinel-lookalike", result.output)
         self.assertNotIn(actual_marker.decode(), result.output)
@@ -716,6 +875,9 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             handle.kill(signal.SIGKILL)
             await _poll_group_dead(handle.pid)
 
+    # A user shell function can only shadow `\command` where the shell resolves
+    # functions; the Windows wrappers call no user-replaceable emitter.
+    @_POSIX_ONLY
     async def test_user_function_cannot_replace_completion_emitter(self):
         # The backslash in `\command` defeats alias expansion only: a shell
         # function named `command` would otherwise swallow both fence frames
@@ -730,10 +892,19 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             await _poll_group_dead(handle.pid)
 
     async def test_shell_killed_before_sentinel_finalizes_from_exit(self):
-        result = await asyncio.wait_for(
-            bash("printf output-before-shell-kill; kill -KILL $$"), timeout=5
-        )
-        self.assertEqual(result.exit_code, -signal.SIGKILL)
+        # The shell must die before its fence: POSIX SIGKILLs itself, PowerShell
+        # exits the process outright. Either way the fallback exit code must stand
+        # and the output written before death must survive.
+        if _shell_uses_posix_syntax():
+            command = "printf output-before-shell-kill; kill -KILL $$"
+            expected = -signal.SIGKILL
+        else:
+            command = (
+                "[Console]::Out.Write('output-before-shell-kill'); [Environment]::Exit(7)"
+            )
+            expected = 7
+        result = await asyncio.wait_for(bash(command), timeout=5)
+        self.assertEqual(result.exit_code, expected)
         self.assertIn("output-before-shell-kill", result.output)
 
     async def test_relative_bash_shell_override_rejected(self):
@@ -765,12 +936,20 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                                     handle = bash("echo hi")
                                     await asyncio.wait_for(handle, timeout=5)
                                     for _ in range(100):
-                                        if handle._reaped:
+                                        # _watch writes the inactive record before it
+                                        # drops the handle from the registry, so waiting
+                                        # for that also waits for the journal file to be
+                                        # closed (Windows cannot unlink an open file).
+                                        with bash_module._live_lock:
+                                            retired = handle not in bash_module._live_handles
+                                        if retired and handle._reaped:
                                             break
                                         await asyncio.sleep(0.05)
-            active = [r for r in await _poll_journal(journal, count=1) if r["active"]]
+                                    records = await _poll_journal(journal, count=2)
+            active = [r for r in records if r["active"]]
             self.assertEqual(len(active), 1)
             self.assertIn("processStartId", active[0])
+            self.assertEqual([r["active"] for r in records], [True, False])
 
     async def test_windows_spawn_creates_child_inside_job(self):
         sentinel = 4242
@@ -811,7 +990,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(handle._job, sentinel)
                 finally:
                     handle._job = None
-                    handle.kill(signal.SIGKILL)
+                    handle.kill(_HARD_KILL)
                     await asyncio.wait_for(handle, timeout=5)
 
     async def test_windows_create_job_failure_fails_closed(self):
@@ -1014,17 +1193,14 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_kill_live_handles_skips_reaped_windows_handle(self):
         stale = mock.Mock(_kill_lock=threading.Lock(), _reaped=True, _job=5, _pid=999)
-        with bash_module._live_lock:
-            bash_module._live_handles.add(stale)
-        try:
+        # A private registry: only this handle may decide the assertion, so the
+        # test cannot be broken by a handle another test has not reaped yet.
+        with mock.patch.object(bash_module, "_live_handles", {stale}):
             with mock.patch.object(bash_module, "_IS_POSIX", False):
                 with mock.patch.object(bash_module._winjob, "terminate") as term:
                     with mock.patch.object(bash_module, "_taskkill_tree") as taskkill:
                         with mock.patch.object(bash_module, "_record_journal") as journal:
                             bash_module._kill_live_handles()
-        finally:
-            with bash_module._live_lock:
-                bash_module._live_handles.discard(stale)
         term.assert_not_called()
         taskkill.assert_not_called()
         stale._proc.kill.assert_not_called()
@@ -1156,7 +1332,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         finally:
             handle._reaped = False
             handle._job = None
-            handle.kill(signal.SIGKILL)
+            handle.kill(_HARD_KILL)
             await asyncio.wait_for(handle, timeout=5)
 
     async def test_windows_failed_job_terminate_falls_back_to_taskkill(self):
@@ -1182,7 +1358,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         finally:
             handle._reaped = False
             handle._job = None
-            handle.kill(signal.SIGKILL)
+            handle.kill(_HARD_KILL)
             await asyncio.wait_for(handle, timeout=5)
 
     async def test_windows_failed_terminate_and_taskkill_leaves_record_active(self):
@@ -1208,6 +1384,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         finally:
             handle._job = None
 
+    @unittest.skipIf(os.name != "posix", "darwin `ps` start-id path is POSIX-only")
     def test_darwin_start_id_uses_absolute_ps(self):
         completed = mock.Mock(stdout="Mon Jan  1 00:00:00 2026\n")
         with mock.patch.object(bash_module.sys, "platform", "darwin"):
@@ -1254,6 +1431,9 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(bash_module.os, "killpg", side_effect=OSError):
             self.assertFalse(bash_module._signal_group(1234567, signal.SIGKILL))
 
+    # Confirms child death through the POSIX process group; Windows reaches the
+    # same contract through the kill-on-close job in test_bash_windows.
+    @_POSIX_ONLY
     async def test_journal_configured_but_unwritable_kills_child_and_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             marker = os.path.join(tmp, "marker")

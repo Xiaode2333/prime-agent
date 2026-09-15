@@ -3,8 +3,8 @@
 These tests run the real spawn path -- CreateProcessW inside a kill-on-close job
 object, with the wrapper's stdout status channel -- so they are skipped off
 Windows. The POSIX status channel (fd 9) keeps its tests in test_bash.py, which
-must stay green and is not weakened by anything here. The two wrapper-generation
-tests are pure string/argv checks and run on every platform.
+must stay green and is not weakened by anything here. WrapperGenerationTest is
+pure string/argv checks and runs on every platform.
 """
 
 from __future__ import annotations
@@ -30,6 +30,8 @@ windows_only = unittest.skipUnless(os.name == "nt", "Windows shell semantics")
 _SYSTEM_ROOT = os.environ.get("SystemRoot", r"C:\Windows")
 _POWERSHELL = os.path.join(_SYSTEM_ROOT, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 _CMD = os.path.join(_SYSTEM_ROOT, "System32", "cmd.exe")
+# The bare marker prefix: never user-visible output on any path.
+_FENCE_TEXT = bash_module._WIN_COMPLETION_PREFIX.decode()
 
 # A process tree query for kill() coverage: cmd.exe and ping are grandchildren of
 # the shell process, so a leader-only kill would leave them running.
@@ -112,6 +114,33 @@ class WindowsShellTest(unittest.IsolatedAsyncioTestCase):
         result = await self._track(bash("throw 'boom'"))
         self.assertEqual(result.exit_code, 1)
         self.assertIn("boom", result.output)
+
+    async def test_error_context_shows_only_the_user_statement(self):
+        # A command ending on an unterminated token makes PowerShell's parser read
+        # on into the next statement. That statement must be the wrapper's bare `;`,
+        # so the error names the user's own text and no wrapper statement is drawn
+        # into the context or glued into the captured output.
+        result = await self._track(bash("Get-ChildItem |"))
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("Get-ChildItem |", result.output)
+        for wrapper_text in ("$__prime", "$global:LASTEXITCODE", _FENCE_TEXT):
+            self.assertNotIn(wrapper_text, result.output)
+
+        # A trailing comma glues the next statement into the command: it must not
+        # print anything of the wrapper's.
+        result = await self._track(bash("Write-Output 1,"))
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("Write-Output 1,", result.output)
+        for wrapper_text in ("$__prime", _FENCE_TEXT):
+            self.assertNotIn(wrapper_text, result.output)
+
+    async def test_probe_survives_a_foreign_last_exit_code(self):
+        # A command that leaves a non-numeric $LASTEXITCODE behind must not abort the
+        # status probe (no wrapper error text), and $? decides the reported status.
+        result = await self._track(bash("$global:LASTEXITCODE = 'nope'; Write-Output done"))
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("done", result.output)
+        self.assertNotIn("$__prime", result.output)
 
     async def test_failing_command_reports_real_exit_code(self):
         # PowerShell collapses a failing native command to 1 when it is the whole
@@ -266,26 +295,50 @@ class WrapperGenerationTest(unittest.TestCase):
     """Pure wiring checks: these run on every platform, including POSIX CI."""
 
     def test_powershell_wrapper_carries_marker_and_status(self):
-        wrapped = bash_module._powershell_wrapper("Write-Output hi", "deadbeef")
+        wrapped = bash_module._powershell_wrapper("Write-Output hi", "deadbeef" * 8)
         lines = wrapped.splitlines()
-        self.assertEqual(lines[0], "$global:LASTEXITCODE = $null")
-        self.assertEqual(lines[1], "Write-Output hi")
+        # The user's command is the first statement, so the line numbers PowerShell
+        # reports for its own errors are the user's own.
+        self.assertEqual(lines[0], "Write-Output hi")
+        # A bare `;` terminates a command that ended on an unterminated token, so the
+        # probe statements can never be parsed as (or blamed for) part of it.
+        self.assertEqual(lines[1], ";")
         # $? must be read before the probe's own statements overwrite it.
         self.assertEqual(lines[2], "$__prime_ok = $?")
         self.assertEqual(lines[3], "$__prime_code = $LASTEXITCODE")
-        self.assertIn("prime-agent-complete:deadbeef", wrapped)
+        # The [int] conversion is guarded: a user-set non-numeric $LASTEXITCODE must
+        # not abort the status line, and the status is never .ToString()'d.
+        self.assertIn("catch { $__prime_code = $null }", wrapped)
+        self.assertIn('+ \"$__prime_status\"', wrapped)
         self.assertIn("exit $__prime_status", wrapped)
         # Parity with the POSIX script's trailing `wait`.
         self.assertIn("Wait-Job", wrapped)
 
     def test_cmd_wrapper_captures_errorlevel_before_echo(self):
-        wrapped = bash_module._cmd_wrapper("echo hi", "deadbeef")
+        wrapped = bash_module._cmd_wrapper("echo hi", "deadbeef" * 8)
         lines = wrapped.splitlines()
         self.assertEqual(lines[0], "@echo off")
         self.assertEqual(lines[1], "echo hi")
         self.assertEqual(lines[2], 'set "__prime_status=%ERRORLEVEL%"')
-        self.assertEqual(lines[3], "echo prime-agent-complete:deadbeef %__prime_status%")
-        self.assertEqual(lines[4], "exit /b %__prime_status%")
+        half = "deadbeef" * 4
+        self.assertEqual(lines[3], f'set "__prime_fence={bash_module._WIN_COMPLETION_PREFIX.decode()}'
+                                 f'{half}"')
+        self.assertEqual(lines[4], f'set "__prime_fence=%__prime_fence%{half} %__prime_status%"')
+        self.assertEqual(lines[5], "echo %__prime_fence%")
+        self.assertEqual(lines[6], "exit /b %__prime_status%")
+
+    def test_windows_wrappers_never_spell_out_the_marker(self):
+        # Both wrappers assemble the fence from two halves, so the contiguous marker
+        # never appears in the child's command line or in the batch file a command
+        # can `type`: the bytes the pump matches on cannot be read back and replayed.
+        token = "0123456789abcdef" * 4
+        marker = bash_module._WIN_COMPLETION_PREFIX.decode() + token
+        for wrapped in (
+            bash_module._powershell_wrapper("Write-Output hi", token),
+            bash_module._cmd_wrapper("echo hi", token),
+        ):
+            self.assertNotIn(marker, wrapped)
+            self.assertIn(marker[: len(bash_module._WIN_COMPLETION_PREFIX) + 32], wrapped)
 
     def test_windows_argv_selection(self):
         posix = bash_module._windows_shell_command(r"C:\Program Files\Git\bin\bash.exe", "echo hi")
@@ -295,10 +348,29 @@ class WrapperGenerationTest(unittest.TestCase):
         self.assertIsNone(posix.cleanup)
 
         powershell = bash_module._windows_shell_command(_POWERSHELL, "echo hi")
-        self.assertEqual(powershell.argv[:5], [_POWERSHELL, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+        self.assertEqual(
+            powershell.argv[:7],
+            [
+                _POWERSHELL,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ],
+        )
         self.assertTrue(powershell.stream_status)
         self.assertTrue(powershell.marker.startswith(bash_module._WIN_COMPLETION_PREFIX))
-        self.assertIsNone(powershell.cleanup)
+        # A script file, so a cmdlet error names the user's own line instead of the
+        # wrapper statements, and the wrapper must be removed after the reap.
+        self.assertIsNotNone(powershell.cleanup)
+        try:
+            self.assertTrue(os.path.exists(powershell.argv[7]))
+            with open(powershell.argv[7], "r", encoding="utf-8-sig", newline="") as handle:
+                self.assertIn("echo hi", handle.read())
+        finally:
+            bash_module.shutil.rmtree(powershell.cleanup, ignore_errors=True)
 
         cmd = bash_module._windows_shell_command(_CMD, "echo hi")
         self.assertEqual(cmd.argv[:3], [_CMD, "/d", "/c"])
