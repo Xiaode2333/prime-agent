@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { RefineSkippedError } from "../../src/core/agent-session.js";
 import type { SessionBeforeRefineEvent } from "../../src/core/extensions/index.js";
@@ -61,7 +62,9 @@ describe("AgentSession session_before_refine extension hook", () => {
 		expect(events[0]?.preparation.instructions).toBe("capture lessons");
 		expect(harness.getPendingResponseCount()).toBe(0);
 
-		const state = loadHarnessState(result.harnessStatePath.replace(/\/[^/]+$/, ""), "local");
+		// dirname, not a POSIX-shaped regex: a Windows path has no forward slash to strip
+		// and the state file would be handed over as if it were the state directory.
+		const state = loadHarnessState(dirname(result.harnessStatePath), "local");
 		const memories = Object.values(state.entries.memory);
 		expect(memories.some((entry) => entry.title === "Extension memory")).toBe(true);
 	});
