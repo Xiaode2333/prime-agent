@@ -38,6 +38,14 @@ vi.mock("node:fs", async (importOriginal) => {
 	return { ...actual, openSync, closeSync, writeSync };
 });
 
+// Every case below runs a fake kernel written as a /bin/sh script; only the
+// missing-path case needs no fake. The product spawns the kernel interpreter
+// directly (spawnHidden(python, ["-m", "rlm.repl"])): Windows has no shebang
+// execution, cannot spawn an extension-less file (ENOENT), and never adds a shell
+// for a .cmd shim. Vitest 4's skipIf takes no reason argument, so the reason lives
+// here.
+const posixOnlyKernelFake = process.platform === "win32";
+
 let tempDir = "";
 
 function writeExecutable(filePath: string, content: string): void {
@@ -57,7 +65,7 @@ describe("ReplKernelManager startup", () => {
 		}
 	});
 
-	it("surfaces kernels that exit before ready with the stderr tail", async () => {
+	it.skipIf(posixOnlyKernelFake)("surfaces kernels that exit before ready with the stderr tail", async () => {
 		const python = join(tempDir, "python");
 		writeExecutable(python, ["#!/bin/sh", 'echo "fake runtime died before ready" >&2', "exit 42", ""].join("\n"));
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -73,7 +81,7 @@ describe("ReplKernelManager startup", () => {
 		}
 	});
 
-	it("lands the exact kernel stderr bytes in the log file", async () => {
+	it.skipIf(posixOnlyKernelFake)("lands the exact kernel stderr bytes in the log file", async () => {
 		const python = join(tempDir, "python");
 		writeExecutable(
 			python,
@@ -114,34 +122,38 @@ describe("ReplKernelManager startup", () => {
 		}
 	});
 
-	it("completes teardown while an inherited grandchild keeps writing stderr", async () => {
-		const python = join(tempDir, "python");
-		writeExecutable(
-			python,
-			[
-				"#!/bin/sh",
-				// A busy writer inherits fd 2 and survives the kernel: its stream
-				// never goes quiet and never EOFs.
-				"sh -c 'while :; do echo post-mortem noise; done' >&2 &",
-				"exit 42",
-				"",
-			].join("\n"),
-		);
-		const stderrLogPath = join(tempDir, "kernel-stderr.log");
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-		const manager = new ReplKernelManager({ python, cwd: tempDir, stderrLogPath });
+	it.skipIf(posixOnlyKernelFake)(
+		"completes teardown while an inherited grandchild keeps writing stderr",
+		async () => {
+			const python = join(tempDir, "python");
+			writeExecutable(
+				python,
+				[
+					"#!/bin/sh",
+					// A busy writer inherits fd 2 and survives the kernel: its stream
+					// never goes quiet and never EOFs.
+					"sh -c 'while :; do echo post-mortem noise; done' >&2 &",
+					"exit 42",
+					"",
+				].join("\n"),
+			);
+			const stderrLogPath = join(tempDir, "kernel-stderr.log");
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+			const manager = new ReplKernelManager({ python, cwd: tempDir, stderrLogPath });
 
-		try {
-			// Well under the 30s ready timeout: teardown must not wait for the
-			// grandchild (destroying the pipe kills it with SIGPIPE).
-			await expect(manager.execute("print(1)")).rejects.toThrow(/Kernel exited before ready/);
-		} finally {
-			errorSpy.mockRestore();
-			await manager.shutdown({ snapshot: true, drainHostRequests: true });
-		}
-	}, 15000);
+			try {
+				// Well under the 30s ready timeout: teardown must not wait for the
+				// grandchild (destroying the pipe kills it with SIGPIPE).
+				await expect(manager.execute("print(1)")).rejects.toThrow(/Kernel exited before ready/);
+			} finally {
+				errorSpy.mockRestore();
+				await manager.shutdown({ snapshot: true, drainHostRequests: true });
+			}
+		},
+		15000,
+	);
 
-	it("caps the stderr log at the write budget while draining pre-ready spew", async () => {
+	it.skipIf(posixOnlyKernelFake)("caps the stderr log at the write budget while draining pre-ready spew", async () => {
 		const python = join(tempDir, "python");
 		writeExecutable(
 			python,
@@ -173,7 +185,7 @@ describe("ReplKernelManager startup", () => {
 		}
 	});
 
-	it("survives a stderr log close failure with a diagnostic", async () => {
+	it.skipIf(posixOnlyKernelFake)("survives a stderr log close failure with a diagnostic", async () => {
 		const python = join(tempDir, "python");
 		writeExecutable(python, ["#!/bin/sh", 'echo "goodbye" >&2', "exit 42", ""].join("\n"));
 		const stderrLogPath = join(tempDir, "kernel-stderr.log");
@@ -194,7 +206,7 @@ describe("ReplKernelManager startup", () => {
 		}
 	});
 
-	it("stops writing at capacity when the oversized file cannot rotate", async () => {
+	it.skipIf(posixOnlyKernelFake)("stops writing at capacity when the oversized file cannot rotate", async () => {
 		const python = join(tempDir, "python");
 		writeExecutable(python, ["#!/bin/sh", 'echo "fresh incarnation" >&2', "exit 42", ""].join("\n"));
 		const stderrLogPath = join(tempDir, "kernel-stderr.log");
@@ -220,7 +232,7 @@ describe("ReplKernelManager startup", () => {
 		}
 	});
 
-	it("grants only the file's remaining capacity as the write budget", async () => {
+	it.skipIf(posixOnlyKernelFake)("grants only the file's remaining capacity as the write budget", async () => {
 		const python = join(tempDir, "python");
 		writeExecutable(python, ["#!/bin/sh", 'echo "fresh incarnation" >&2', "exit 42", ""].join("\n"));
 		const stderrLogPath = join(tempDir, "kernel-stderr.log");
@@ -240,7 +252,7 @@ describe("ReplKernelManager startup", () => {
 		}
 	});
 
-	it("rotates an oversized stderr log at spawn", async () => {
+	it.skipIf(posixOnlyKernelFake)("rotates an oversized stderr log at spawn", async () => {
 		const python = join(tempDir, "python");
 		writeExecutable(python, ["#!/bin/sh", 'echo "fresh incarnation" >&2', "exit 42", ""].join("\n"));
 		const stderrLogPath = join(tempDir, "kernel-stderr.log");
@@ -259,7 +271,7 @@ describe("ReplKernelManager startup", () => {
 		}
 	});
 
-	it("fails a runtime announcing an unexpected protocol version", async () => {
+	it.skipIf(posixOnlyKernelFake)("fails a runtime announcing an unexpected protocol version", async () => {
 		const python = join(tempDir, "python");
 		writeExecutable(
 			python,
@@ -290,7 +302,7 @@ describe("ReplKernelManager startup", () => {
 		}
 	});
 
-	it("times out a runtime that never sends ready", async () => {
+	it.skipIf(posixOnlyKernelFake)("times out a runtime that never sends ready", async () => {
 		vi.useFakeTimers();
 		const python = join(tempDir, "python");
 		writeExecutable(python, ["#!/bin/sh", "exec sleep 120", ""].join("\n"));

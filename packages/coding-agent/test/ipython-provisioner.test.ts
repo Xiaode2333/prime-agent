@@ -13,6 +13,16 @@ import {
 } from "../src/core/kernel/index.js";
 import { createIpythonToolDefinition, IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 
+// These cases need the fake kernel to actually run: either the /bin/sh fake
+// (writeFakePython) or the Node-shebang runtime (writeFakeReplRuntime) must spawn
+// and speak the REPL protocol. The product spawns the interpreter directly
+// (spawnHidden(python, ["-m", "rlm.repl"])), so Windows cannot start either one
+// (no shebang execution, ENOENT for an extension-less file, and a .cmd needs a
+// shell). Cases that only count fake spawns would pass vacuously there, so they
+// are POSIX-only too. Vitest 4's skipIf takes no reason argument, so the reason
+// lives here.
+const posixOnlyKernelFake = process.platform === "win32";
+
 let tempDir = "";
 
 function writeFakePython(opts: { sleepSeconds?: number } = {}): { python: string; countRuns: () => number } {
@@ -128,24 +138,27 @@ describe("IpythonKernelProvisioner", () => {
 		}
 	});
 
-	it("does not surface a failed startup before the kernel's final snapshot flush finished", async () => {
-		const marker = join(tempDir, "snapshot-flushed");
-		const snapshotDir = join(tempDir, "snapshots");
-		mkdirSync(snapshotDir, { recursive: true });
-		const python = writeFakeReplRuntime(marker);
-		const provisioner = new IpythonKernelProvisioner(tempDir, { python, snapshotDir });
-		try {
-			await expect(provisioner.ensure()).rejects.toThrow(/Failed to initialize rlm runtime/);
-			// The failed kernel's teardown (final snapshot flush included) completed
-			// before the failure surfaced, so a replacement provisioner gated on this
-			// one cannot race the still-flushing kernel over the same snapshot files.
-			expect(existsSync(marker)).toBe(true);
-		} finally {
-			await provisioner.dispose();
-		}
-	});
+	it.skipIf(posixOnlyKernelFake)(
+		"does not surface a failed startup before the kernel's final snapshot flush finished",
+		async () => {
+			const marker = join(tempDir, "snapshot-flushed");
+			const snapshotDir = join(tempDir, "snapshots");
+			mkdirSync(snapshotDir, { recursive: true });
+			const python = writeFakeReplRuntime(marker);
+			const provisioner = new IpythonKernelProvisioner(tempDir, { python, snapshotDir });
+			try {
+				await expect(provisioner.ensure()).rejects.toThrow(/Failed to initialize rlm runtime/);
+				// The failed kernel's teardown (final snapshot flush included) completed
+				// before the failure surfaced, so a replacement provisioner gated on this
+				// one cannot race the still-flushing kernel over the same snapshot files.
+				expect(existsSync(marker)).toBe(true);
+			} finally {
+				await provisioner.dispose();
+			}
+		},
+	);
 
-	it("memoizes concurrent ensure() calls into one startup", async () => {
+	it.skipIf(posixOnlyKernelFake)("memoizes concurrent ensure() calls into one startup", async () => {
 		const { python, countRuns } = writeFakePython();
 		const provisioner = new IpythonKernelProvisioner(tempDir, { python });
 
@@ -155,7 +168,7 @@ describe("IpythonKernelProvisioner", () => {
 		expect(countRuns()).toBe(1);
 	});
 
-	it("retries after a failed startup instead of caching the rejection", async () => {
+	it.skipIf(posixOnlyKernelFake)("retries after a failed startup instead of caching the rejection", async () => {
 		const { python, countRuns } = writeFakePython();
 		const provisioner = new IpythonKernelProvisioner(tempDir, { python });
 
@@ -164,7 +177,7 @@ describe("IpythonKernelProvisioner", () => {
 		expect(countRuns()).toBe(2);
 	});
 
-	it("prewarm() swallows the failure and the next ensure() starts fresh", async () => {
+	it.skipIf(posixOnlyKernelFake)("prewarm() swallows the failure and the next ensure() starts fresh", async () => {
 		const { python, countRuns } = writeFakePython();
 		const provisioner = new IpythonKernelProvisioner(tempDir, { python });
 
@@ -178,7 +191,7 @@ describe("IpythonKernelProvisioner", () => {
 		});
 	});
 
-	it("replays the current startup stage to listeners attaching mid-flight", async () => {
+	it.skipIf(posixOnlyKernelFake)("replays the current startup stage to listeners attaching mid-flight", async () => {
 		const { python } = writeFakePython({ sleepSeconds: 1 });
 		const provisioner = new IpythonKernelProvisioner(tempDir, { python });
 
@@ -189,7 +202,7 @@ describe("IpythonKernelProvisioner", () => {
 		await expect(joined).rejects.toThrow();
 	});
 
-	it("dispose() settles a startup that is still in flight", async () => {
+	it.skipIf(posixOnlyKernelFake)("dispose() settles a startup that is still in flight", async () => {
 		const { python } = writeFakePython();
 		const provisioner = new IpythonKernelProvisioner(tempDir, { python });
 
@@ -198,24 +211,27 @@ describe("IpythonKernelProvisioner", () => {
 		expect(provisioner.manager).toBeUndefined();
 	});
 
-	it("skips the snapshot when dispose({ snapshot: false }) aborts a startup in flight", async () => {
-		const marker = join(tempDir, "snapshot-flushed");
-		const executeStarted = join(tempDir, "execute-started");
-		const executeGate = join(tempDir, "execute-gate");
-		const snapshotDir = join(tempDir, "snapshots");
-		mkdirSync(snapshotDir, { recursive: true });
-		const python = writeFakeReplRuntime(marker, {
-			gatedExecute: { startedPath: executeStarted, gatePath: executeGate },
-		});
-		const provisioner = new IpythonKernelProvisioner(tempDir, { python, snapshotDir });
+	it.skipIf(posixOnlyKernelFake)(
+		"skips the snapshot when dispose({ snapshot: false }) aborts a startup in flight",
+		async () => {
+			const marker = join(tempDir, "snapshot-flushed");
+			const executeStarted = join(tempDir, "execute-started");
+			const executeGate = join(tempDir, "execute-gate");
+			const snapshotDir = join(tempDir, "snapshots");
+			mkdirSync(snapshotDir, { recursive: true });
+			const python = writeFakeReplRuntime(marker, {
+				gatedExecute: { startedPath: executeStarted, gatePath: executeGate },
+			});
+			const provisioner = new IpythonKernelProvisioner(tempDir, { python, snapshotDir });
 
-		const started = provisioner.ensure().catch(() => undefined);
-		await vi.waitFor(() => expect(existsSync(executeStarted)).toBe(true));
-		const disposed = provisioner.dispose({ snapshot: false });
-		writeFileSync(executeGate, "1");
-		await Promise.all([disposed, started]);
-		expect(existsSync(marker)).toBe(false);
-	});
+			const started = provisioner.ensure().catch(() => undefined);
+			await vi.waitFor(() => expect(existsSync(executeStarted)).toBe(true));
+			const disposed = provisioner.dispose({ snapshot: false });
+			writeFileSync(executeGate, "1");
+			await Promise.all([disposed, started]);
+			expect(existsSync(marker)).toBe(false);
+		},
+	);
 
 	it("dispose({ snapshot: false }) skips the kernel's final snapshot flush", async () => {
 		const { python } = writeFakePython();
@@ -227,7 +243,7 @@ describe("IpythonKernelProvisioner", () => {
 		expect(shutdown).toHaveBeenCalledWith({ snapshot: false, drainHostRequests: true });
 	});
 
-	it("dispose() before the boot slot prevents the kernel from spawning", async () => {
+	it.skipIf(posixOnlyKernelFake)("dispose() before the boot slot prevents the kernel from spawning", async () => {
 		const { python, countRuns } = writeFakePython();
 		let release: () => void = () => {};
 		const gate = new Promise<void>((r) => {
@@ -242,26 +258,29 @@ describe("IpythonKernelProvisioner", () => {
 		expect(countRuns()).toBe(0); // disposed boot must never spawn a kernel
 	});
 
-	it("aborting the startup owner before the boot slot prevents the kernel from spawning", async () => {
-		const { python, countRuns } = writeFakePython();
-		let release: () => void = () => {};
-		const gate = new Promise<void>((r) => {
-			release = r;
-		});
-		const provisioner = new IpythonKernelProvisioner(tempDir, { python, readyGate: gate });
-		const controller = new AbortController();
+	it.skipIf(posixOnlyKernelFake)(
+		"aborting the startup owner before the boot slot prevents the kernel from spawning",
+		async () => {
+			const { python, countRuns } = writeFakePython();
+			let release: () => void = () => {};
+			const gate = new Promise<void>((r) => {
+				release = r;
+			});
+			const provisioner = new IpythonKernelProvisioner(tempDir, { python, readyGate: gate });
+			const controller = new AbortController();
 
-		const started = provisioner.ensure(undefined, controller.signal);
-		controller.abort();
-		await expect(started).rejects.toThrow("Python execution aborted");
-		release();
-		await new Promise((r) => setTimeout(r, 50));
+			const started = provisioner.ensure(undefined, controller.signal);
+			controller.abort();
+			await expect(started).rejects.toThrow("Python execution aborted");
+			release();
+			await new Promise((r) => setTimeout(r, 50));
 
-		expect(countRuns()).toBe(0);
-		expect(provisioner.manager).toBeUndefined();
-	});
+			expect(countRuns()).toBe(0);
+			expect(provisioner.manager).toBeUndefined();
+		},
+	);
 
-	it("waits for readyGate before starting the kernel", async () => {
+	it.skipIf(posixOnlyKernelFake)("waits for readyGate before starting the kernel", async () => {
 		const { python, countRuns } = writeFakePython();
 		let release: () => void = () => {};
 		const gate = new Promise<void>((r) => {
@@ -313,7 +332,7 @@ describe("IpythonKernelProvisioner", () => {
 		});
 	}
 
-	it("drops a dead kernel memo so ensure() restarts instead of reusing it", async () => {
+	it.skipIf(posixOnlyKernelFake)("drops a dead kernel memo so ensure() restarts instead of reusing it", async () => {
 		const { python, countRuns } = writeFakePython();
 		const provisioner = new IpythonKernelProvisioner(tempDir, { python });
 		primeKernelMemo(provisioner, { isRunning: false, isDefunct: true } as unknown as KernelClient);
@@ -462,21 +481,24 @@ describe("ReplKernelManager session cleanup during startup", () => {
 		}
 	});
 
-	it("disposes a kernel that is still booting when its session is cleaned up", async () => {
-		const python = join(tempDir, "python");
-		// Never emits the ready line - stays in the booting phase until killed.
-		writeFileSync(python, ["#!/bin/sh", "sleep 30", ""].join("\n"));
-		chmodSync(python, 0o755);
-		const sessionId = `provisioner-test-${Date.now()}`;
-		const manager = new ReplKernelManager({ python, cwd: tempDir, sessionId });
+	it.skipIf(posixOnlyKernelFake)(
+		"disposes a kernel that is still booting when its session is cleaned up",
+		async () => {
+			const python = join(tempDir, "python");
+			// Never emits the ready line - stays in the booting phase until killed.
+			writeFileSync(python, ["#!/bin/sh", "sleep 30", ""].join("\n"));
+			chmodSync(python, 0o755);
+			const sessionId = `provisioner-test-${Date.now()}`;
+			const manager = new ReplKernelManager({ python, cwd: tempDir, sessionId });
 
-		try {
-			const startup = manager.start();
-			cleanupSessionResources(sessionId);
-			await expect(startup).rejects.toThrow(/Kernel exited before ready|disposed during startup/);
-			expect(manager.isRunning).toBe(false);
-		} finally {
-			await manager.shutdown({ snapshot: true, drainHostRequests: true });
-		}
-	});
+			try {
+				const startup = manager.start();
+				cleanupSessionResources(sessionId);
+				await expect(startup).rejects.toThrow(/Kernel exited before ready|disposed during startup/);
+				expect(manager.isRunning).toBe(false);
+			} finally {
+				await manager.shutdown({ snapshot: true, drainHostRequests: true });
+			}
+		},
+	);
 });

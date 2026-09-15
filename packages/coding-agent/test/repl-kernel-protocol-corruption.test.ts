@@ -4,6 +4,14 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ReplKernelManager } from "../src/core/kernel/index.js";
 
+// Every case here drives a fake kernel runtime (a shebang script). The product
+// spawns the interpreter directly (spawnHidden(python, ["-m", "rlm.repl"])): Windows
+// cannot execute a shebang, cannot spawn an extension-less file (ENOENT), and
+// cannot spawn a .cmd without a shell the product never adds. The whole block
+// therefore needs a POSIX host, where the fake is a real process.
+// Vitest 4's skipIf takes no reason argument, so the reason lives here.
+const posixOnlyKernelFake = process.platform === "win32";
+
 let tempDir = "";
 
 function writeFakeRuntime(path: string): void {
@@ -135,7 +143,7 @@ function restoreCount(path: string): number {
 	return existsSync(path) ? readFileSync(path, "utf8").length : 0;
 }
 
-describe("ReplKernelManager corrupt protocol repair", () => {
+describe.skipIf(posixOnlyKernelFake)("ReplKernelManager corrupt protocol repair", () => {
 	beforeEach(() => {
 		tempDir = mkdtempSync(join(tmpdir(), "prime-agent-repl-corrupt-"));
 	});
