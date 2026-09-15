@@ -63,6 +63,61 @@ describe("AuthStorage", () => {
 		return value.replace(/\\/g, "/").replace(/"/g, '\\"');
 	}
 
+	/**
+	 * `!command` fixtures are executed through the platform shell (`getShellConfig()`:
+	 * Windows PowerShell on win32, the default POSIX shell elsewhere), so shell
+	 * syntax must be built per platform. `[Console]::Out.Write` and `printf '%s'`
+	 * both emit the value byte-for-byte with no trailing newline and no CRLF
+	 * rewriting, so the surrounding assertions stay platform-independent.
+	 */
+	function printCommand(value: string): string {
+		if (process.platform === "win32") {
+			const parts = value.split("\n").map((part) => `'${part.replace(/'/g, "''")}'`);
+			return `![Console]::Out.Write(${parts.join(" + [char]10 + ")})`;
+		}
+		return `!printf '%s' '${value.replace(/'/g, "'\\''")}'`;
+	}
+
+	/** Same contract as {@link printCommand}, but the value passes through a pipe. */
+	function pipeCommand(): string {
+		return process.platform === "win32"
+			? "!'hello world'.Split(' ') -join '-' | ForEach-Object { $_ }"
+			: "!echo 'hello world' | tr ' ' '-'";
+	}
+
+	/** `!command` fixture that prints a file's exact contents: POSIX `cat`, PowerShell `[IO.File]::ReadAllText`. */
+	function fileContentsCommand(path: string): string {
+		if (process.platform === "win32") {
+			return `![Console]::Out.Write([IO.File]::ReadAllText('${path.replace(/'/g, "''")}'))`;
+		}
+		return `!sh -c 'cat "${toShPath(path)}"'`;
+	}
+
+	/**
+	 * `!command` fixture that increments a counter file and prints `value`; with
+	 * `fail: true` it exits non-zero after the increment, so tests can prove a
+	 * failure is cached (auth) or retried (registry).
+	 */
+	function counterCommand(path: string, value: string, options: { fail?: boolean } = {}): string {
+		if (process.platform === "win32") {
+			const winPath = path.replace(/'/g, "''");
+			const increment = `$c = [int][IO.File]::ReadAllText('${winPath}'); [IO.File]::WriteAllText('${winPath}', [string]($c + 1))`;
+			return options.fail ? `!${increment}; exit 1` : `!${increment}; [Console]::Out.Write('${value}')`;
+		}
+		const shPath = toShPath(path);
+		const increment = `count=$(cat "${shPath}"); echo $((count + 1)) > "${shPath}"`;
+		return options.fail ? `!sh -c '${increment}; exit 1'` : `!sh -c '${increment}; echo "${value}"'`;
+	}
+
+	/**
+	 * POSIX-only assertion: Windows has no POSIX mode bits, so Node reports 0o666 for
+	 * any writable file there and the owner-only guarantee of auth.json is not observable.
+	 */
+	function expectOwnerOnlyAuthFileMode() {
+		if (process.platform === "win32") return;
+		expect(statSync(authJsonPath).mode & 0o777).toBe(0o600);
+	}
+
 	describe("API key resolution", () => {
 		test("literal API key is returned directly", async () => {
 			writeAuthJson({
@@ -77,7 +132,7 @@ describe("AuthStorage", () => {
 
 		test("apiKey with ! prefix executes command and uses stdout", async () => {
 			writeAuthJson({
-				anthropic: { type: "api_key", key: "!echo test-api-key-from-command" },
+				anthropic: { type: "api_key", key: printCommand("test-api-key-from-command") },
 			});
 
 			authStorage = AuthStorage.create(authJsonPath);
@@ -88,7 +143,7 @@ describe("AuthStorage", () => {
 
 		test("apiKey with ! prefix trims whitespace from command output", async () => {
 			writeAuthJson({
-				anthropic: { type: "api_key", key: "!echo '  spaced-key  '" },
+				anthropic: { type: "api_key", key: printCommand("  spaced-key  ") },
 			});
 
 			authStorage = AuthStorage.create(authJsonPath);
@@ -99,7 +154,7 @@ describe("AuthStorage", () => {
 
 		test("apiKey with ! prefix handles multiline output (uses trimmed result)", async () => {
 			writeAuthJson({
-				anthropic: { type: "api_key", key: "!printf 'line1\\nline2'" },
+				anthropic: { type: "api_key", key: printCommand("line1\nline2") },
 			});
 
 			authStorage = AuthStorage.create(authJsonPath);
@@ -132,7 +187,7 @@ describe("AuthStorage", () => {
 
 		test("apiKey with ! prefix returns undefined on empty output", async () => {
 			writeAuthJson({
-				anthropic: { type: "api_key", key: "!printf ''" },
+				anthropic: { type: "api_key", key: printCommand("") },
 			});
 
 			authStorage = AuthStorage.create(authJsonPath);
@@ -245,9 +300,8 @@ describe("AuthStorage", () => {
 		test("changed command-backed stored key no longer matches stale auth marker", async () => {
 			const tokenFile = join(tempDir, "command-token");
 			writeFileSync(tokenFile, "stale-key");
-			const tokenPath = toShPath(tokenFile);
 			writeAuthJson({
-				anthropic: { type: "api_key", key: `!sh -c 'cat "${tokenPath}"'` },
+				anthropic: { type: "api_key", key: fileContentsCommand(tokenFile) },
 			});
 
 			authStorage = AuthStorage.create(authJsonPath);
@@ -432,7 +486,7 @@ describe("AuthStorage", () => {
 					authStorage = createStorage();
 					authStorage.setPrimeInferenceApiKey("agent-key", team);
 					expect(cliState()).toBe(cliBefore);
-					expect(statSync(authJsonPath).mode & 0o777).toBe(0o600);
+					expectOwnerOnlyAuthFileMode();
 					const reopened = createStorage();
 					await expect(reopened.getApiKey("prime-inference")).resolves.toBe("agent-key");
 					expect(reopened.getPrimeInferenceTeamSelection()).toEqual(team);
@@ -555,7 +609,7 @@ describe("AuthStorage", () => {
 
 		test("apiKey command can use shell features like pipes", async () => {
 			writeAuthJson({
-				anthropic: { type: "api_key", key: "!echo 'hello world' | tr ' ' '-'" },
+				anthropic: { type: "api_key", key: pipeCommand() },
 			});
 
 			authStorage = AuthStorage.create(authJsonPath);
@@ -569,8 +623,7 @@ describe("AuthStorage", () => {
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
 
-				const counterPath = toShPath(counterFile);
-				const command = `!sh -c 'count=$(cat "${counterPath}"); echo $((count + 1)) > "${counterPath}"; echo "key-value"'`;
+				const command = counterCommand(counterFile, "key-value");
 				writeAuthJson({
 					anthropic: { type: "api_key", key: command },
 				});
@@ -589,8 +642,7 @@ describe("AuthStorage", () => {
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
 
-				const counterPath = toShPath(counterFile);
-				const command = `!sh -c 'count=$(cat "${counterPath}"); echo $((count + 1)) > "${counterPath}"; echo "key-value"'`;
+				const command = counterCommand(counterFile, "key-value");
 				writeAuthJson({
 					anthropic: { type: "api_key", key: command },
 				});
@@ -607,8 +659,8 @@ describe("AuthStorage", () => {
 
 			test("different commands are cached separately", async () => {
 				writeAuthJson({
-					anthropic: { type: "api_key", key: "!echo key-anthropic" },
-					openai: { type: "api_key", key: "!echo key-openai" },
+					anthropic: { type: "api_key", key: printCommand("key-anthropic") },
+					openai: { type: "api_key", key: printCommand("key-openai") },
 				});
 
 				authStorage = AuthStorage.create(authJsonPath);
@@ -624,8 +676,7 @@ describe("AuthStorage", () => {
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
 
-				const counterPath = toShPath(counterFile);
-				const command = `!sh -c 'count=$(cat "${counterPath}"); echo $((count + 1)) > "${counterPath}"; exit 1'`;
+				const command = counterCommand(counterFile, "key-value", { fail: true });
 				writeAuthJson({
 					anthropic: { type: "api_key", key: command },
 				});
@@ -760,7 +811,7 @@ describe("AuthStorage", () => {
 				process.umask(previousUmask);
 			}
 
-			expect(statSync(authJsonPath).mode & 0o777).toBe(0o600);
+			expectOwnerOnlyAuthFileMode();
 			const onDisk = JSON.parse(readFileSync(authJsonPath, "utf-8")) as Record<string, { key: string }>;
 			expect(onDisk.openai.key).toBe("masked-key");
 		});
@@ -971,7 +1022,7 @@ describe("AuthStorage", () => {
 	describe("runtime overrides", () => {
 		test("runtime override takes priority over auth.json", async () => {
 			writeAuthJson({
-				anthropic: { type: "api_key", key: "!echo stored-key" },
+				anthropic: { type: "api_key", key: printCommand("stored-key") },
 			});
 
 			authStorage = AuthStorage.create(authJsonPath);
@@ -984,7 +1035,7 @@ describe("AuthStorage", () => {
 
 		test("removing runtime override falls back to auth.json", async () => {
 			writeAuthJson({
-				anthropic: { type: "api_key", key: "!echo stored-key" },
+				anthropic: { type: "api_key", key: printCommand("stored-key") },
 			});
 
 			authStorage = AuthStorage.create(authJsonPath);
