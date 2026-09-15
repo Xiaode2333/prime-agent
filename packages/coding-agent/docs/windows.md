@@ -103,8 +103,20 @@ at it, and then the kernel keeps the POSIX behaviour.
 
 - `prime-agent` is not recognized after install: open a new terminal, or run `$env:Path = "$env:APPDATA\npm;$env:Path"` for the current session.
 - The kernel reports that uv is missing: install it with `powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"`, or set `PRIME_AGENT_KERNEL_PYTHON` to an interpreter that already has `prime-agent-runtime` installed.
-- `npm install` fails with `EBUSY` or a locked `*.node` file: antivirus or a file handle held the freshly written native module. The installer retries this class of failure automatically; a manual retry also succeeds.
-- Background service problems: `prime-agent doctor` inspects state, and `prime-agent doctor --fix` repairs it.
+- `npm install`, `npm ci`, or `npm uninstall` fails with `EBUSY`, `EPERM`, or a locked `*.node` file: a process still holds the native module. A running daemon is the usual cause, and a leftover build or test process is the other. Stop the daemon first, then retry:
+
+  ```powershell
+  prime-agent shutdown --force
+  ```
+
+  Then re-run the command. The installer retries this class of failure automatically for its own install step.
+- Calling `prime-agent` from inside a `.cmd` or `.bat` script never returns: invoking another batch file without `call` transfers control to it permanently, so the script stops at that line. Use `call prime-agent ...` instead:
+
+  ```bat
+  call prime-agent --version
+  ```
+
+- Background service problems: `prime-agent doctor` inspects state, and `prime-agent doctor --fix` repairs it. On Windows the list comes from the supervisor-owner registry, so a live daemon whose identity cannot be confirmed is reported as `unverified` rather than omitted.
 
 ## Uninstall
 
