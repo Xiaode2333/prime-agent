@@ -11,6 +11,9 @@ import { SessionManager } from "../../../src/core/session-manager.js";
 import { SettingsManager } from "../../../src/core/settings-manager.js";
 import { createAllToolDefinitions } from "../../../src/core/tools/index.js";
 
+// Vitest 4's skipIf takes no reason argument, so the reason lives beside the flag.
+const posixOnlyFakeShell = process.platform === "win32";
+
 describe("regression #4428: remove legacy pi-mono built-in tools", () => {
 	let tempDir: string;
 	let agentDir: string;
@@ -107,57 +110,65 @@ describe("regression #4428: remove legacy pi-mono built-in tools", () => {
 		session.dispose();
 	});
 
-	it("applies shell settings to bash() commands in the REPL", async () => {
-		const shellPath = join(tempDir, "custom-shell.sh");
-		writeFileSync(shellPath, "#!/bin/sh\nprintf 'custom-shell\\n'\nexec /bin/sh \"$@\"\n");
-		chmodSync(shellPath, 0o755);
+	// POSIX-only: the fixture's shellPath is a `#!/bin/sh` script, and the kernel's
+	// bash() starts the configured shell through CreateProcessW, which rejects a
+	// shebang script with 193 (ERROR_BAD_EXE_FORMAT). Windows ships no equivalent
+	// fake shell that a direct spawn can start.
+	it.skipIf(posixOnlyFakeShell)(
+		"applies shell settings to bash() commands in the REPL",
+		async () => {
+			const shellPath = join(tempDir, "custom-shell.sh");
+			writeFileSync(shellPath, "#!/bin/sh\nprintf 'custom-shell\\n'\nexec /bin/sh \"$@\"\n");
+			chmodSync(shellPath, 0o755);
 
-		const settingsManager = SettingsManager.create(tempDir, agentDir);
-		settingsManager.setShellCommandPrefix("echo prefix-from-settings");
-		settingsManager.setShellPath(shellPath);
-		const sessionManager = SessionManager.inMemory(tempDir);
-		const resourceLoader = new DefaultResourceLoader({
-			cwd: tempDir,
-			agentDir,
-			settingsManager,
-		});
-		await resourceLoader.reload();
-
-		const { session } = await createAgentSession({
-			cwd: tempDir,
-			agentDir,
-			model: getModel("anthropic", "claude-sonnet-5")!,
-			settingsManager,
-			sessionManager,
-			resourceLoader,
-			tools: ["ipython"],
-		});
-
-		try {
-			expect(session.getActiveToolNames()).toEqual(["ipython"]);
-			const ipythonTool = session.agent.state.tools.find((tool) => tool.name === "ipython");
-			expect(ipythonTool).toBeTruthy();
-
-			// %%bash cells fail as plain Python syntax errors instead of running.
-			const rejected = await ipythonTool!.execute("tool-0", { code: "%%bash\necho body" });
-			expect(rejected.details).toMatchObject({ status: "error" });
-			const rejectedText = rejected.content
-				.filter((item): item is { type: "text"; text: string } => item.type === "text")
-				.map((item) => item.text)
-				.join("");
-			expect(rejectedText).toContain("SyntaxError");
-
-			// bash() picks up the configured shell and command prefix from the tool environment.
-			const result = await ipythonTool!.execute("tool-1", {
-				code: "print((await bash('echo body')).output)",
+			const settingsManager = SettingsManager.create(tempDir, agentDir);
+			settingsManager.setShellCommandPrefix("echo prefix-from-settings");
+			settingsManager.setShellPath(shellPath);
+			const sessionManager = SessionManager.inMemory(tempDir);
+			const resourceLoader = new DefaultResourceLoader({
+				cwd: tempDir,
+				agentDir,
+				settingsManager,
 			});
-			const output = result.content
-				.filter((item): item is { type: "text"; text: string } => item.type === "text")
-				.map((item) => item.text)
-				.join("");
-			expect(output).toContain("custom-shell\nprefix-from-settings\nbody");
-		} finally {
-			await session.disposeAsync();
-		}
-	}, 120_000);
+			await resourceLoader.reload();
+
+			const { session } = await createAgentSession({
+				cwd: tempDir,
+				agentDir,
+				model: getModel("anthropic", "claude-sonnet-5")!,
+				settingsManager,
+				sessionManager,
+				resourceLoader,
+				tools: ["ipython"],
+			});
+
+			try {
+				expect(session.getActiveToolNames()).toEqual(["ipython"]);
+				const ipythonTool = session.agent.state.tools.find((tool) => tool.name === "ipython");
+				expect(ipythonTool).toBeTruthy();
+
+				// %%bash cells fail as plain Python syntax errors instead of running.
+				const rejected = await ipythonTool!.execute("tool-0", { code: "%%bash\necho body" });
+				expect(rejected.details).toMatchObject({ status: "error" });
+				const rejectedText = rejected.content
+					.filter((item): item is { type: "text"; text: string } => item.type === "text")
+					.map((item) => item.text)
+					.join("");
+				expect(rejectedText).toContain("SyntaxError");
+
+				// bash() picks up the configured shell and command prefix from the tool environment.
+				const result = await ipythonTool!.execute("tool-1", {
+					code: "print((await bash('echo body')).output)",
+				});
+				const output = result.content
+					.filter((item): item is { type: "text"; text: string } => item.type === "text")
+					.map((item) => item.text)
+					.join("");
+				expect(output).toContain("custom-shell\nprefix-from-settings\nbody");
+			} finally {
+				await session.disposeAsync();
+			}
+		},
+		120_000,
+	);
 });

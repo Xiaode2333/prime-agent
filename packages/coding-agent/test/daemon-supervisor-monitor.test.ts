@@ -22,6 +22,7 @@ import {
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSocketPathLease } from "../src/modes/daemon/daemon-socket.js";
 import { DaemonSupervisor, handshakeBudgetMs } from "../src/modes/daemon/daemon-supervisor.js";
+import * as daemonOwnership from "../src/modes/daemon/daemon-supervisor-ownership.js";
 import {
 	DaemonWorkerAuthenticationError,
 	DaemonWorkerClient,
@@ -1227,64 +1228,80 @@ describe("daemon worker supervisor monitoring", () => {
 
 	it("keeps the supervisor monitor armed after a replacement binds but exits before claiming", async () => {
 		vi.useFakeTimers();
-		// The supervisor socket is dead, comes up with the replacement launch,
-		// then dies again before the replacement ever claims the worker.
-		const probeResults = [false, true, false, false];
-		let probeCount = 0;
-		const daemon = createHarness(async () => {
-			const result = probeResults[Math.min(probeCount, probeResults.length - 1)];
-			probeCount += 1;
-			return result ?? false;
-		});
-		// Drive the fake clock until the expected number of probes have run;
-		// one advance alone does not flush the availability check chain.
-		const advanceUntilProbes = async (expected: number) => {
-			for (let step = 0; probeCount < expected && step < 200; step++) {
-				await vi.advanceTimersByTimeAsync(100);
-			}
-			expect(probeCount).toBe(expected);
-		};
+		// The availability chain awaits the on-disk shutdown-admission lookup, whose
+		// proper-lockfile I/O does not finish within a run of fake-clock advances
+		// (the whole 200-step loop completed in ~5ms on Windows), which made this
+		// test fail on timing rather than on behaviour. Pin the lookup so the chain
+		// is driven by the fake clock alone.
+		const admission = vi.spyOn(daemonOwnership, "isDaemonShutdownAdmissionActive").mockResolvedValue(false);
+		try {
+			// The supervisor socket is dead, comes up with the replacement launch,
+			// then dies again before the replacement ever claims the worker.
+			const probeResults = [false, true, false, false];
+			let probeCount = 0;
+			const daemon = createHarness(async () => {
+				const result = probeResults[Math.min(probeCount, probeResults.length - 1)];
+				probeCount += 1;
+				return result ?? false;
+			});
+			// Drive the fake clock until the expected number of probes have run;
+			// one advance alone does not flush the availability check chain.
+			const advanceUntilProbes = async (expected: number) => {
+				for (let step = 0; probeCount < expected && step < 200; step++) {
+					await vi.advanceTimersByTimeAsync(100);
+				}
+				expect(probeCount).toBe(expected);
+			};
 
-		daemon.scheduleSupervisorAvailabilityCheck("/tmp/supervisor.sock", 1500);
-		await advanceUntilProbes(2);
-		expect(daemon.launchReplacementSupervisor).toHaveBeenCalledOnce();
-		// The replacement binding mid-launch restarts the orphan window...
-		expect(daemon.supervisorAbsentSince).toBeUndefined();
-		// ...but a bind is not an authenticated claim: the monitor must stay armed
-		// instead of orphaning the worker if the replacement exits unclaimed.
-		expect(daemon.supervisorMonitorTimer).toBeDefined();
+			daemon.scheduleSupervisorAvailabilityCheck("/tmp/supervisor.sock", 1500);
+			await advanceUntilProbes(2);
+			expect(daemon.launchReplacementSupervisor).toHaveBeenCalledOnce();
+			// The replacement binding mid-launch restarts the orphan window...
+			expect(daemon.supervisorAbsentSince).toBeUndefined();
+			// ...but a bind is not an authenticated claim: the monitor must stay armed
+			// instead of orphaning the worker if the replacement exits unclaimed.
+			expect(daemon.supervisorMonitorTimer).toBeDefined();
 
-		await advanceUntilProbes(4);
-		expect(daemon.launchReplacementSupervisor).toHaveBeenCalledTimes(2);
-		expect(daemon.canConnectToSupervisor).toHaveBeenCalledTimes(4);
-		expect(daemon.supervisorMonitorTimer).toBeDefined();
+			await advanceUntilProbes(4);
+			expect(daemon.launchReplacementSupervisor).toHaveBeenCalledTimes(2);
+			expect(daemon.canConnectToSupervisor).toHaveBeenCalledTimes(4);
+			expect(daemon.supervisorMonitorTimer).toBeDefined();
+		} finally {
+			admission.mockRestore();
+		}
 	});
 
 	it("retries when shutdown admission lookup fails", async () => {
 		vi.useFakeTimers();
-		let resolveProbe: () => void = () => undefined;
-		const probeCompleted = new Promise<void>((resolve) => {
-			resolveProbe = resolve;
-		});
-		const daemon = createHarness(async () => {
-			resolveProbe();
-			return true;
-		});
-		const registryDir = process.env[supervisorRegistryDirEnv];
-		if (!registryDir) throw new Error("Supervisor registry test directory was not set");
-		rmSync(registryDir, { recursive: true, force: true });
-		writeFileSync(registryDir, "not a directory");
+		// A corrupted registry directory used to make the real lookup reject; that
+		// rejection travels through proper-lockfile I/O, so the retry depended on how
+		// fast the disk answered under the fake clock. Reject the first lookup
+		// explicitly instead - same failure mode, no real I/O in the chain.
+		const admission = vi
+			.spyOn(daemonOwnership, "isDaemonShutdownAdmissionActive")
+			.mockRejectedValueOnce(new Error("shutdown admission lookup failed"))
+			.mockResolvedValue(false);
+		try {
+			let resolveProbe: () => void = () => undefined;
+			const probeCompleted = new Promise<void>((resolve) => {
+				resolveProbe = resolve;
+			});
+			const daemon = createHarness(async () => {
+				resolveProbe();
+				return true;
+			});
 
-		daemon.scheduleSupervisorAvailabilityCheck("/tmp/supervisor.sock", 0);
-		await vi.advanceTimersByTimeAsync(0);
-		expect(daemon.canConnectToSupervisor).not.toHaveBeenCalled();
-		expect(daemon.supervisorMonitorTimer).toBeDefined();
+			daemon.scheduleSupervisorAvailabilityCheck("/tmp/supervisor.sock", 0);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(daemon.canConnectToSupervisor).not.toHaveBeenCalled();
+			expect(daemon.supervisorMonitorTimer).toBeDefined();
 
-		rmSync(registryDir, { force: true });
-		mkdirSync(registryDir, { recursive: true });
-		await vi.advanceTimersByTimeAsync(5000);
-		await probeCompleted;
-		expect(daemon.canConnectToSupervisor).toHaveBeenCalledOnce();
+			await vi.advanceTimersByTimeAsync(5000);
+			await probeCompleted;
+			expect(daemon.canConnectToSupervisor).toHaveBeenCalledOnce();
+		} finally {
+			admission.mockRestore();
+		}
 	});
 
 	it("recovers exactly once after shutdown admission clears", async () => {

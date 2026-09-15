@@ -15,6 +15,12 @@ vi.mock("../src/core/kernel/bootstrap.js", async (importOriginal) => {
 	return { ...original, ensureKernelPython: ensureKernelPythonMock };
 });
 
+// The fake interpreter below is a `#!/bin/sh` script and the manager spawns the
+// interpreter directly, without a shell, so Windows reports ENOENT instead of the
+// kernel's own exit code. Vitest 4's skipIf takes no reason argument, so the
+// reason lives here.
+const posixOnlyKernelFake = process.platform === "win32";
+
 let tempDir = "";
 const savedJournalPath = process.env[ORPHAN_PROCESS_JOURNAL_ENV];
 
@@ -53,7 +59,7 @@ describe("repl kernel parent watchdog", () => {
 		}
 	});
 
-	it("spawn sets PRIME_AGENT_KERNEL_OWNER_PID and journals the kernel pid", async () => {
+	it.skipIf(posixOnlyKernelFake)("spawn sets PRIME_AGENT_KERNEL_OWNER_PID and journals the kernel pid", async () => {
 		const envDump = join(tempDir, "kernel-env");
 		const python = writeFakePython(["#!/bin/sh", `env > "${envDump}"`, "exit 42", ""]);
 		const journalPath = join(tempDir, "orphans.jsonl");

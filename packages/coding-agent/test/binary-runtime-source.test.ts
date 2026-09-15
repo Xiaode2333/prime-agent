@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { resolveRuntimeIdentity } from "../src/core/kernel/bootstrap.js";
 
@@ -21,7 +21,10 @@ it("resolves and fingerprints the Python source beside a standalone executable",
 	const expected = createHash("sha256");
 	for (const [name, content] of Object.entries(files)) {
 		writeFileSync(join(source, name), content);
-		expected.update(name).update("\0").update(content).update("\0");
+		// The product fingerprints `path.relative(sourceDir, file)`
+		// (src/core/kernel/bootstrap.ts:778), which spells the separator natively, so
+		// the fixture hashes the same spelling instead of a POSIX literal.
+		expected.update(name.split("/").join(sep)).update("\0").update(content).update("\0");
 	}
 	const initial = await resolveRuntimeIdentity();
 	expect(initial).toBe(`sha256:${expected.digest("hex")}`);

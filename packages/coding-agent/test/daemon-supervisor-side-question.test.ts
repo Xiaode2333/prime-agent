@@ -13,6 +13,7 @@ import {
 } from "../src/modes/daemon/daemon-protocol.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import { MutationDrainLatch } from "../src/modes/daemon/mutation-drain-latch.js";
+import { testSocketPath } from "./socket-path.js";
 
 interface SupervisorHarness {
 	handleLine(client: DaemonSocketClient, line: string): Promise<void>;
@@ -125,7 +126,8 @@ describe("daemon supervisor side-question routing", () => {
 
 	it("rejects a protocol-6 client through the supervisor socket before state exchange", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-old-client-"));
-		const socketPath = join(root, "supervisor.sock");
+		// Windows only listens on a named pipe; a POSIX path fails with EACCES.
+		const socketPath = testSocketPath(root, "supervisor.sock");
 		const supervisor = new DaemonSupervisor(socketPath, {
 			defaultSessionConfig: { cwd: root, agentDir: root },
 			descriptorDir: join(root, "workers"),

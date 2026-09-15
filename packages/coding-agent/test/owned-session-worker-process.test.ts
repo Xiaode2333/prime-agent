@@ -320,7 +320,15 @@ describe("owned session worker processes", () => {
 		while (!existsSync(`${pidPath}.terminated`) && Date.now() < terminationDeadline) {
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
 		}
-		expect(existsSync(`${pidPath}.terminated`)).toBe(true);
+		if (process.platform !== "win32") {
+			// POSIX-only marker: the worker ends itself from the SIGTERM its
+			// owner-watch delivers when the IPC channel drops (src/cli/owned-session-worker.ts:496-516),
+			// and the fixture records that in the marker. Windows terminates a
+			// non-detached child together with its parent, so the worker is never
+			// given the chance to run the handler; on both platforms the guarantee
+			// under test is the one asserted by waitForProcessGone below.
+			expect(existsSync(`${pidPath}.terminated`)).toBe(true);
+		}
 		await waitForProcessGone(workerPid);
 	});
 });

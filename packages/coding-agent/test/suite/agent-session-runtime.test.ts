@@ -458,6 +458,8 @@ describe("AgentSessionRuntime characterization", () => {
 	it("keeps semantic spawn lineage through the production runtime factory", async () => {
 		const tempDir = join(tmpdir(), `pi-runtime-factory-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		vi.stubEnv("HOME", tempDir);
+		// homedir() reads USERPROFILE on win32; HOME alone leaves the real profile in charge.
+		vi.stubEnv("USERPROFILE", tempDir);
 		cleanups.push(() => {
 			vi.unstubAllEnvs();
 		});

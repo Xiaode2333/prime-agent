@@ -4,6 +4,7 @@ import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getProcessStartId } from "../src/core/session-lease.js";
+import { normalizeSocketPath } from "../src/modes/daemon/daemon-socket.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import {
 	acquireDaemonShutdownAdmission,
@@ -285,7 +286,10 @@ describe("daemon supervisor ownership registry", () => {
 		if (!lostOnDisk) throw new Error("assertCurrent did not throw");
 		expect(lostOnDisk.code).toBe("supervisor_generation_stale");
 		expect(lostOnDisk.message).toContain("no longer owns its registry entry");
-		expect(lostOnDisk.message).toContain(paths.socketPath);
+		// The lost-ownership error reports the record's socket path, which the
+		// acquisition normalized (win32 folds case and separators), not the caller's
+		// raw spelling.
+		expect(lostOnDisk.message).toContain(normalizeSocketPath(paths.socketPath));
 		expect(lostOnDisk.message).toContain(paths.registryDir);
 		expect(lostOnDisk.message).toContain("sessions are preserved");
 		expect(lostOnDisk.message).not.toBe(neverAcquired.message);

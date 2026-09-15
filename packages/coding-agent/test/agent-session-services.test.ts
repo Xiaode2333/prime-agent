@@ -34,6 +34,8 @@ describe("createAgentSessionFromServices", () => {
 		mkdirSync(tempDir, { recursive: true });
 		cleanupPaths.push(tempDir);
 		vi.stubEnv("HOME", tempDir);
+		// homedir() reads USERPROFILE on win32; HOME alone leaves the real profile in charge.
+		vi.stubEnv("USERPROFILE", tempDir);
 		vi.stubEnv(ENV_AGENT_DIR, "");
 		const injected = AuthStorage.inMemory();
 		for (const options of [{}, { agentDir: join(tempDir, "custom") }, { authStorage: injected }]) {

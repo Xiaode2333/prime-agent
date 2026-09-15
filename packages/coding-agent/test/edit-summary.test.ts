@@ -88,7 +88,9 @@ describe("edit summaries", () => {
 	});
 
 	test("coalesces home-relative and absolute paths", () => {
-		const absolutePath = `${homedir()}/same.ts`;
+		// join() spells the same path the product builds when it expands "~" for the
+		// host (src/core/tools/path-utils.ts:64-72), so both entries fold to one key.
+		const absolutePath = join(homedir(), "same.ts");
 		const message = assistant([
 			{ type: "toolCall", id: "one", name: "edit", arguments: { path: "~/same.ts" } },
 			{ type: "toolCall", id: "two", name: "ipython", arguments: {} },

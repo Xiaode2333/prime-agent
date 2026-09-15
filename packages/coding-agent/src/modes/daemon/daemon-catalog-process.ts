@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import { getPackageDir, isBunBinary } from "../../config.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
@@ -352,8 +352,12 @@ export class DaemonCatalogClient {
 			args = launch.args;
 		} else {
 			const catalogEntry = resolveDaemonCatalogEntrypoint();
+			// --import takes a URL specifier: a bare Windows path is rejected by the ESM
+			// loader (ERR_UNSUPPORTED_ESM_URL_SCHEME), which killed the catalog child on
+			// startup. POSIX paths work either way.
+			const tsxEntrypoint = createRequire(import.meta.url).resolve("tsx");
 			const execArgs = catalogEntry.endsWith(".ts")
-				? [...process.execArgv, "--import", createRequire(import.meta.url).resolve("tsx")]
+				? [...process.execArgv, "--import", pathToFileURL(tsxEntrypoint).href]
 				: process.execArgv;
 			const launch = createCliSubprocessLaunchSpec([], undefined, execArgs, catalogEntry);
 			command = launch.command;

@@ -1003,7 +1003,9 @@ describe("ENG-4509 side questions", () => {
 				await handleEvent.call(fakeThis, event);
 			});
 
-			await defaultEditor.onSubmit?.("!echo hello from side");
+			// Quoted so the default Windows shell (Windows PowerShell) prints one
+			// line: `echo hello from side` is Write-Output with three arguments there.
+			await defaultEditor.onSubmit?.('!echo "hello from side"');
 
 			// The wire events carry the transient marker and echoed runId, so other
 			// clients suppress the run and this client correlates it by identity.
@@ -1027,7 +1029,7 @@ describe("ENG-4509 side questions", () => {
 
 			// A normal-mode run of the same command is recorded as usual and lands
 			// in the chat like any main-thread bash execution.
-			await harness.session.runUserBash("echo main thread");
+			await harness.session.runUserBash('echo "main thread"');
 			expect(harness.session.messages.some((message) => message.role === "bashExecution")).toBe(true);
 			expect(chatContainer.children.some((child) => child instanceof BashExecutionComponent)).toBe(true);
 		} finally {

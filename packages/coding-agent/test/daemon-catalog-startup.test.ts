@@ -1,5 +1,6 @@
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const spawnState = vi.hoisted(() => ({
@@ -31,14 +32,17 @@ afterEach(() => {
 
 describe("daemon catalog startup", () => {
 	it("does not mistake an ancestor src directory for the package source tree", () => {
-		const packageDir = "/usr/src/app/packages/coding-agent";
+		// The product compares paths spelled the way its own platform spells them
+		// (`join(packageDir, "src")` + `sep`), so the fixture must too: a literal
+		// POSIX spelling is not a module path on win32.
+		const packageDir = join("/usr/src/app/packages/coding-agent");
 
-		expect(isDaemonCatalogSourcePath(`${packageDir}/dist/modes/daemon/daemon-catalog-process.js`, packageDir)).toBe(
-			false,
-		);
-		expect(isDaemonCatalogSourcePath(`${packageDir}/src/modes/daemon/daemon-catalog-process.ts`, packageDir)).toBe(
-			true,
-		);
+		expect(
+			isDaemonCatalogSourcePath(join(packageDir, "dist/modes/daemon/daemon-catalog-process.js"), packageDir),
+		).toBe(false);
+		expect(
+			isDaemonCatalogSourcePath(join(packageDir, "src/modes/daemon/daemon-catalog-process.ts"), packageDir),
+		).toBe(true);
 	});
 
 	it("uses the dedicated entrypoint and allows a cold start past five seconds", async () => {

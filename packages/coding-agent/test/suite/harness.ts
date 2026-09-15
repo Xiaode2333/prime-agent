@@ -246,7 +246,20 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			if (existsSync(tempDir)) {
 				// Spawned fixture processes may still be flushing their final registry
 				// writes; retry briefly instead of failing the suite on ENOTEMPTY.
-				rmSync(tempDir, { recursive: true, force: true, maxRetries: 40, retryDelay: 50 });
+				const options = { recursive: true, force: true, maxRetries: 40, retryDelay: 50 } as const;
+				if (process.platform === "win32") {
+					// Windows refuses to delete a directory that a spawned fixture still
+					// holds open (EPERM, not the POSIX unlink-anytime behaviour), and a
+					// leftover temp tree must not fail a test that already passed. The
+					// removal is best-effort there only; POSIX still fails loudly.
+					try {
+						rmSync(tempDir, options);
+					} catch {
+						// The temp tree is left for the OS temp cleaner.
+					}
+				} else {
+					rmSync(tempDir, options);
+				}
 			}
 		},
 	};

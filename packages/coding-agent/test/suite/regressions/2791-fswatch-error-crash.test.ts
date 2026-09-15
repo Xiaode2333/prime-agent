@@ -1,9 +1,16 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../../../src/config.js";
+
+// `execFileSync("npx", ...)` cannot start on Windows: npx is a .cmd shim, which a
+// direct spawn without a shell does not resolve (ENOENT), and the swallowed spawn
+// error looked like "child crashed (exit 1)". Launch the same TypeScript loader
+// every other suite fixture uses, through the current Node binary.
+const tsxPath = resolve(__dirname, "../../../../../node_modules/tsx/dist/cli.mjs");
 
 /**
  * Regression test for https://github.com/earendil-works/pi-mono/issues/2791
@@ -40,7 +47,11 @@ describe("issue #2791 fs.watch error event crashes process", () => {
 	});
 
 	it("process should survive an error event on the theme FSWatcher", () => {
-		const themeModulePath = join(__dirname, "../../../src/modes/interactive/theme/theme.js").replace(/\\/g, "/");
+		// The generated module imports the theme by specifier: a bare absolute
+		// Windows path is rejected by the ESM loader (ERR_UNSUPPORTED_ESM_URL_SCHEME),
+		// while a file URL is valid everywhere and still resolves to the TypeScript
+		// source through tsx.
+		const themeModuleUrl = pathToFileURL(join(__dirname, "../../../src/modes/interactive/theme/theme.js")).href;
 		const agentDir = join(tempRoot, "agent").replace(/\\/g, "/");
 
 		// Script that sets up the watcher and emits a synthetic error on it.
@@ -50,7 +61,7 @@ describe("issue #2791 fs.watch error event crashes process", () => {
 		writeFileSync(
 			scriptPath,
 			`
-import { setTheme, stopThemeWatcher } from "${themeModulePath}";
+import { setTheme, stopThemeWatcher } from ${JSON.stringify(themeModuleUrl)};
 
 process.env[${JSON.stringify(ENV_AGENT_DIR)}] = ${JSON.stringify(agentDir)};
 
@@ -88,7 +99,7 @@ process.exit(0);
 		let stderr = "";
 		let exitCode: number;
 		try {
-			_stdout = execFileSync("npx", ["tsx", scriptPath], {
+			_stdout = execFileSync(process.execPath, [tsxPath, scriptPath], {
 				timeout: 10000,
 				encoding: "utf-8",
 				env: { ...process.env, [ENV_AGENT_DIR]: agentDir },
@@ -96,9 +107,11 @@ process.exit(0);
 			});
 			exitCode = 0;
 		} catch (err: unknown) {
-			const e = err as { status: number; stdout: string; stderr: string };
+			// A spawn failure has no status and no captured streams; surface its
+			// message instead of reporting a bare exit 1.
+			const e = err as { status?: number | null; stdout?: string; stderr?: string; message?: string };
 			_stdout = e.stdout ?? "";
-			stderr = e.stderr ?? "";
+			stderr = e.stderr ?? e.message ?? "";
 			exitCode = e.status ?? 1;
 		}
 

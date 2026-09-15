@@ -207,7 +207,10 @@ describe("SessionManager.flushNow", () => {
 		expect(mgr.getSessionFile()).toBe(alias);
 		expect(lstatSync(alias).isSymbolicLink()).toBe(true);
 		expect(JSON.parse(readFileSync(target, "utf8")).version).toBe(3);
-		expect(statSync(target).mode & 0o777).toBe(0o640);
+		if (process.platform !== "win32") {
+			// Mode bits are not access control on Windows; the ACL hardening covers it.
+			expect(statSync(target).mode & 0o777).toBe(0o640);
+		}
 	});
 
 	it("is a no-op for in-memory (non-persisted) sessions", () => {
