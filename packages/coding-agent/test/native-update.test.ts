@@ -45,7 +45,8 @@ describe("native release metadata isolation", () => {
 		writeFileSync(join(releaseDir, "package.json"), JSON.stringify({ version: "1.2.3" }));
 		executable = join(releaseDir, "prime-agent");
 		writeFileSync(executable, "fixture executable");
-		target = `../releases/${releaseName}/prime-agent`;
+		// Built with join so the recorded link target matches readlink on this platform.
+		target = join("..", "releases", releaseName, "prime-agent");
 		symlinkSync(target, join(root, "bin", "prime-agent"));
 	});
 
@@ -75,25 +76,36 @@ describe("native release metadata isolation", () => {
 				packageName: "prime-agent",
 				installSpec: `${baseUrl}/releases/v1.2.4/prime-agent-1.2.4.tgz`,
 			});
+			// No standalone Windows archive is published, so a Windows binary is never
+			// installer-owned and the refusal comes from ownership rather than metadata.
+			const refusal =
+				process.platform === "win32"
+					? "This compiled application is not owned by the Prime Agent installer."
+					: "No verified compiled archive is available for linux-x64.";
 			for (const force of [false, true]) {
-				await expect(getNativeUpdatePlan({ force, rollback: false, executable })).rejects.toThrow(
-					"No verified compiled archive is available for linux-x64.",
-				);
+				await expect(getNativeUpdatePlan({ force, rollback: false, executable })).rejects.toThrow(refusal);
 			}
 			expect(readlinkSync(join(root, "bin", "prime-agent"))).toBe(target);
 		},
 	);
 
-	it("uses the verified platform checksum when the entire native list is valid", async () => {
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async () => Response.json({ version: "1.2.4", binaries: [artifact] })),
-		);
+	// Expects a native update to be planned. `getNativeInstallationTarget` has no
+	// Windows target because no standalone Windows archive is published, so the plan
+	// always refuses there; the metadata parsing this covers is platform-neutral and
+	// still asserted by the invalid-metadata cases above, which run on Windows.
+	it.skipIf(process.platform === "win32")(
+		"uses the verified platform checksum when the entire native list is valid",
+		async () => {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => Response.json({ version: "1.2.4", binaries: [artifact] })),
+			);
 
-		const plan = await getNativeUpdatePlan({ force: false, rollback: false, executable });
+			const plan = await getNativeUpdatePlan({ force: false, rollback: false, executable });
 
-		expect(plan.targetVersion).toBe("1.2.4");
-		expect(plan.command?.args).toContain(`PRIME_AGENT_EXPECTED_SHA256=${artifact.sha256}`);
-		expect(plan.command?.args).toContain("PRIME_AGENT_INSTALL_METHOD=binary");
-	});
+			expect(plan.targetVersion).toBe("1.2.4");
+			expect(plan.command?.args).toContain(`PRIME_AGENT_EXPECTED_SHA256=${artifact.sha256}`);
+			expect(plan.command?.args).toContain("PRIME_AGENT_INSTALL_METHOD=binary");
+		},
+	);
 });

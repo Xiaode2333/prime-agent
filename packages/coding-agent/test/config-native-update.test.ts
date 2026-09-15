@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { NATIVE_RELEASE_ASSETS } from "../src/utils/native-installation.js";
 
@@ -57,15 +58,24 @@ console.log(getUpdateInstruction('prime-agent'));
 				);
 				const output = execFileSync(
 					process.execPath,
-					["--import", resolve(__dirname, "../../../node_modules/tsx/dist/loader.mjs"), entrypoint, executable],
+					[
+						"--import",
+						// A bare Windows path is rejected by the ESM loader; it needs a URL.
+						pathToFileURL(resolve(__dirname, "../../../node_modules/tsx/dist/loader.mjs")).href,
+						entrypoint,
+						executable,
+					],
 					{
 						encoding: "utf8",
 						timeout: 10000,
 						env: { ...process.env, PI_PACKAGE_DIR: resolve(__dirname, "..") },
 					},
 				);
+				// Windows has no standalone archive, so an install there is never
+				// installer-owned and every state reports the download fallback.
+				const usesDownloadFallback = state === "unmanaged" || process.platform === "win32";
 				expect(output.trim()).toBe(
-					state === "unmanaged"
+					usesDownloadFallback
 						? "Download from: https://github.com/PrimeIntellect-ai/prime-agent/releases/latest"
 						: "Run: prime-agent update",
 				);
