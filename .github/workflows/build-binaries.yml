@@ -514,6 +514,9 @@ jobs:
             --content-type text/plain \
             --cache-control no-cache
 
+          echo "macOS/Linux installer: ${R2_PUBLIC_BASE_URL%/}/install.sh"
+          echo "Windows installer: ${R2_PUBLIC_BASE_URL%/}/install.ps1"
+
       - name: Create production GitHub release
         if: env.PUBLISH_PRODUCTION == 'true'
         env:
@@ -596,6 +599,16 @@ jobs:
             --content-type text/x-shellscript \
             --cache-control no-cache
 
+          aws s3 cp /tmp/prime-agent-install.ps1 "s3://${R2_BUCKET}/install.ps1" \
+            --endpoint-url "$R2_ENDPOINT_URL" \
+            --content-type text/plain \
+            --cache-control no-cache
+
+          aws s3 cp /tmp/prime-agent-install-beta.ps1 "s3://${R2_BUCKET}/install-beta.ps1" \
+            --endpoint-url "$R2_ENDPOINT_URL" \
+            --content-type text/plain \
+            --cache-control no-cache
+
           printf 'Automated beta build from `%s` (`%s`).\n' "$DEFAULT_BRANCH" "$BUILD_REF" > /tmp/beta-release-notes.md
 
           if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/beta" >/dev/null 2>&1; then
@@ -627,3 +640,4 @@ jobs:
 
           gh release upload beta "$BETA_DIR"/* --clobber
           echo "Beta installer: ${R2_PUBLIC_BASE_URL%/}/install-beta.sh"
+          echo "Beta Windows installer: ${R2_PUBLIC_BASE_URL%/}/install-beta.ps1"
