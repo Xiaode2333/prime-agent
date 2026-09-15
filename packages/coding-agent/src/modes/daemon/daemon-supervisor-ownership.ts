@@ -557,6 +557,75 @@ export async function assertDaemonSupervisorOwnerCurrent(
 	return fingerprint;
 }
 
+/**
+ * Read-only snapshot of a durable supervisor-owner record. Callers that must
+ * find daemons without an OS listener listing (Windows named pipes have no
+ * `ss`/`lsof` equivalent) read the registry through this shape.
+ */
+export interface DaemonSupervisorOwnerSnapshot {
+	generation: string;
+	pid: number;
+	processStartId?: string;
+	socketPath: string;
+	descriptorDir: string;
+	agentDir: string;
+	appVersion: string;
+	phase: DaemonSupervisorOwnerPhase;
+}
+
+/**
+ * List every durable supervisor-owner record on the machine, newest registry
+ * first. Nothing is reclaimed here: whether a record still backs a live daemon
+ * is the caller's decision, because only the caller knows which process
+ * identity it can trust. Unreadable records are skipped, matching the other
+ * read-only legacy scans.
+ */
+export function readDaemonSupervisorOwnerSnapshots(
+	environment: NodeJS.ProcessEnv = process.env,
+): DaemonSupervisorOwnerSnapshot[] {
+	const registryDirs = [defaultDaemonSupervisorRegistryDir(environment)];
+	const legacyRegistryDir = legacyDaemonSupervisorRegistryDir(environment);
+	if (legacyRegistryDir) {
+		registryDirs.push(legacyRegistryDir);
+	}
+	const snapshots: DaemonSupervisorOwnerSnapshot[] = [];
+	const seen = new Set<string>();
+	for (const registryDir of registryDirs) {
+		for (const directory of listOwnerDirectoriesIfPresent(registryDir)) {
+			const owner = readOwnerRecord(directory);
+			if (!owner) {
+				continue;
+			}
+			// A record moved between registries keeps its generation and token.
+			const key = `${owner.generation}\0${owner.token}`;
+			if (seen.has(key)) {
+				continue;
+			}
+			seen.add(key);
+			snapshots.push({
+				generation: owner.generation,
+				pid: owner.pid,
+				...(owner.processStartId ? { processStartId: owner.processStartId } : {}),
+				socketPath: owner.socketPath,
+				descriptorDir: owner.descriptorDir,
+				agentDir: owner.agentDir,
+				appVersion: owner.appVersion,
+				phase: owner.phase,
+			});
+		}
+	}
+	return snapshots;
+}
+
+function listOwnerDirectoriesIfPresent(registryDir: string): string[] {
+	try {
+		return listOwnerDirectories(registryDir);
+	} catch {
+		// A missing registry directory has no owners; nothing else is recoverable here.
+		return [];
+	}
+}
+
 export async function acquireDaemonShutdownAdmission(): Promise<DaemonShutdownAdmission> {
 	const registryDir = defaultDaemonSupervisorRegistryDir();
 	const processStartId = getProcessStartId(process.pid);

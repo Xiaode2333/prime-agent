@@ -39,6 +39,7 @@ function colorStatus(status: DaemonStatus, value: string): string {
 		case "stale":
 			return chalk.yellow(value);
 		case "unreachable":
+		case "unverified":
 			return chalk.red(value);
 		case "orphan-file":
 			return chalk.dim(value);

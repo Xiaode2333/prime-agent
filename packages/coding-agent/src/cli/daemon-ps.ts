@@ -16,7 +16,11 @@ import {
 	type DaemonRuntimeIdentity,
 } from "../modes/daemon/daemon-protocol.js";
 import { defaultDaemonSocketDir, defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
-import { acquireDaemonShutdownAdmission } from "../modes/daemon/daemon-supervisor-ownership.js";
+import {
+	acquireDaemonShutdownAdmission,
+	type DaemonSupervisorOwnerSnapshot,
+	readDaemonSupervisorOwnerSnapshots,
+} from "../modes/daemon/daemon-supervisor-ownership.js";
 import type { DaemonWorkerDescriptor } from "../modes/daemon/daemon-worker-protocol.js";
 import {
 	isProcessAlive,
@@ -41,12 +45,19 @@ import { promptYesNo } from "./daemon-stop-confirm.js";
  *  2. A sweep of the default socket dir, which catches orphaned socket *files*
  *     left behind by daemons that are no longer running.
  *
+ * Neither applies on Windows, where a daemon listens on a named pipe: no OS
+ * listing maps that endpoint back to its owning process, and a pipe has no
+ * directory to sweep. Windows discovery therefore reads the durable
+ * supervisor-owner registry (`scanWindowsSupervisorOwnerDaemons`), which every
+ * supervisor writes for its own socket path, and counts a record only while the
+ * recorded process identity still matches the live process.
+ *
  * Each discovered socket is then probed with the existing daemon_hello + list
  * primitives, so introspection works even against stale daemons running an
  * older build (a new protocol command would not).
  */
 
-export type DaemonStatus = "current" | "stale" | "unreachable" | "orphan-file";
+export type DaemonStatus = "current" | "stale" | "unreachable" | "unverified" | "orphan-file";
 
 export interface DiscoveredDaemonProcess {
 	pid: number;
@@ -67,6 +78,8 @@ export interface DaemonInfo {
 	sessionCount?: number;
 	status: DaemonStatus;
 	isDefault: boolean;
+	/** Set when a live supervisor-owner process could not be positively identified (win32 registry discovery). */
+	unverifiedReason?: string;
 	hasTrackedWorkers?: boolean;
 }
 
@@ -74,7 +87,8 @@ const STATUS_ORDER: Record<DaemonStatus, number> = {
 	current: 0,
 	stale: 1,
 	unreachable: 2,
-	"orphan-file": 3,
+	unverified: 3,
+	"orphan-file": 4,
 };
 const SHUTDOWN_QUIET_PERIOD_MS = 1000;
 const SHUTDOWN_CONVERGENCE_TIMEOUT_MS = 10_000;
@@ -176,10 +190,105 @@ export function parsePsEtimes(stdout: string): Map<number, number> {
 	return uptimes;
 }
 
-function scanListeningDaemons(): DiscoveredDaemonProcess[] {
-	if (process.platform === "win32") {
-		return [];
+/** A live supervisor-owner process whose identity the registry scan could not confirm. */
+export interface UnverifiedDaemonProcess {
+	pid: number;
+	socketPath: string;
+	detail: string;
+}
+
+export interface DaemonProcessScan {
+	/** Daemons with a positively identified owning process. */
+	verified: DiscoveredDaemonProcess[];
+	/** Live owner processes that must not be reported as identified daemons. */
+	unverified: UnverifiedDaemonProcess[];
+}
+
+export type SupervisorOwnerClassification =
+	| { state: "verified"; pid: number }
+	| { state: "stale" }
+	| { state: "unverified"; pid: number; detail: string };
+
+/**
+ * Decide whether a supervisor-owner record still backs the daemon that wrote
+ * it. Only a process that exists AND still carries the recorded start id counts
+ * as verified, so a recycled pid is never reported to callers that kill pids. A
+ * live process whose identity cannot be confirmed is reported as unverified
+ * rather than dropped: a silent miss would let shutdown claim success while the
+ * daemon keeps running.
+ */
+export function classifySupervisorOwner(
+	owner: { pid: number; processStartId?: string },
+	isAlive: (pid: number) => boolean = isProcessAlive,
+	readProcessStartId: (pid: number) => string | undefined = getProcessStartId,
+): SupervisorOwnerClassification {
+	if (!isAlive(owner.pid)) {
+		return { state: "stale" };
 	}
+	if (!owner.processStartId) {
+		return { state: "unverified", pid: owner.pid, detail: "its owner record has no process start id" };
+	}
+	const observed = readProcessStartId(owner.pid);
+	if (observed === owner.processStartId) {
+		return { state: "verified", pid: owner.pid };
+	}
+	if (observed !== undefined) {
+		return { state: "stale" };
+	}
+	// One retry only when a read failed: a single transient failure must not hide a live daemon.
+	return readProcessStartId(owner.pid) === owner.processStartId
+		? { state: "verified", pid: owner.pid }
+		: { state: "unverified", pid: owner.pid, detail: "its process start id could not be read" };
+}
+
+/**
+ * Windows daemons listen on named pipes, which have no `ss`/`lsof` equivalent
+ * that maps a listener back to its owning pid, so discovery reads the durable
+ * supervisor-owner registry instead. The registry is written by every
+ * supervisor and keyed by socket path, which is all the shared probe path
+ * needs.
+ */
+export function scanWindowsSupervisorOwnerDaemons(
+	owners: readonly DaemonSupervisorOwnerSnapshot[] = readDaemonSupervisorOwnerSnapshots(),
+	isAlive: (pid: number) => boolean = isProcessAlive,
+	readProcessStartId: (pid: number) => string | undefined = getProcessStartId,
+): DaemonProcessScan {
+	const verified: DiscoveredDaemonProcess[] = [];
+	const unverified: UnverifiedDaemonProcess[] = [];
+	const seen = new Set<string>();
+	for (const owner of owners) {
+		const classification = classifySupervisorOwner(owner, isAlive, readProcessStartId);
+		if (classification.state === "stale") {
+			continue;
+		}
+		const socketPath = normalizeSocketPath(owner.socketPath);
+		const key = `${classification.pid}\0${socketPath}`;
+		if (seen.has(key)) {
+			continue;
+		}
+		seen.add(key);
+		if (classification.state === "verified") {
+			verified.push({ pid: classification.pid, socketPath });
+		} else {
+			unverified.push({ pid: classification.pid, socketPath, detail: classification.detail });
+		}
+	}
+	return { verified, unverified };
+}
+
+/** Identify daemons on this platform: OS listener scan on POSIX, registry scan on win32. */
+function scanDaemonProcesses(): DaemonProcessScan {
+	if (process.platform === "win32") {
+		return scanWindowsSupervisorOwnerDaemons();
+	}
+	return { verified: scanPosixListeningDaemons(), unverified: [] };
+}
+
+function scanListeningDaemons(): DiscoveredDaemonProcess[] {
+	return scanDaemonProcesses().verified;
+}
+
+function scanPosixListeningDaemons(): DiscoveredDaemonProcess[] {
 	const ss = spawnSyncHidden("ss", ["-lxp"], { encoding: "utf8" });
 	if (!ss.error && ss.status === 0 && typeof ss.stdout === "string") {
 		return enrichUptimes(parseSsListeners(ss.stdout, APP_NAME));
@@ -309,6 +418,34 @@ async function probeDaemon(socketPath: string): Promise<ProbeResult> {
 	}
 }
 
+/**
+ * Status of one discovered socket path. `unverified` is the only status that
+ * means "a live process is registered here but we could not prove it is this
+ * daemon", which callers must report as a failure instead of a success.
+ */
+export function classifyDiscoveredDaemonStatus(daemon: {
+	reachable: boolean;
+	protocolVersion?: number;
+	schemaId?: string;
+	version?: string;
+	hasIdentifiedProcess?: boolean;
+	hasTrackedWorkers?: boolean;
+	hasUnverifiedProcess?: boolean;
+}): DaemonStatus {
+	if (daemon.reachable) {
+		return classifyReachable({
+			reachable: true,
+			protocolVersion: daemon.protocolVersion,
+			schemaId: daemon.schemaId,
+			version: daemon.version,
+		});
+	}
+	if (daemon.hasIdentifiedProcess || daemon.hasTrackedWorkers) {
+		return "unreachable";
+	}
+	return daemon.hasUnverifiedProcess ? "unverified" : "orphan-file";
+}
+
 function classifyReachable(probe: ProbeResult): DaemonStatus {
 	if (
 		probe.protocolVersion === DAEMON_PROTOCOL_VERSION &&
@@ -345,12 +482,21 @@ export function verifyHelloSupervisorPid(
 
 /** Discover every daemon on the machine and probe each for version + session count. */
 export async function discoverDaemons(): Promise<DaemonInfo[]> {
+	const scan = scanDaemonProcesses();
 	const processBySocket = new Map<string, DiscoveredDaemonProcess>();
-	for (const daemon of scanListeningDaemons()) {
+	for (const daemon of scan.verified) {
 		if (isWorkerSocketPath(daemon.socketPath)) {
 			continue;
 		}
 		processBySocket.set(daemon.socketPath, daemon);
+	}
+	// Probe unidentified sockets too: a reachable pipe can still name its own process.
+	const unverifiedBySocket = new Map<string, UnverifiedDaemonProcess>();
+	for (const process of scan.unverified) {
+		if (isWorkerSocketPath(process.socketPath)) {
+			continue;
+		}
+		unverifiedBySocket.set(process.socketPath, process);
 	}
 
 	const workerSockets = new Set(
@@ -358,6 +504,7 @@ export async function discoverDaemons(): Promise<DaemonInfo[]> {
 	);
 	const sockets = new Set<string>([
 		...processBySocket.keys(),
+		...unverifiedBySocket.keys(),
 		...scanSocketDir().filter((socketPath) => !isWorkerSocketPath(socketPath)),
 		...workerSockets,
 	]);
@@ -369,11 +516,16 @@ export async function discoverDaemons(): Promise<DaemonInfo[]> {
 			const probe = await probeDaemon(socketPath);
 			const pid = proc?.pid ?? verifyHelloSupervisorPid(probe.supervisorPid, probe.supervisorProcessStartId);
 			const hasTrackedWorkers = workerSockets.has(socketPath);
-			const status: DaemonStatus = probe.reachable
-				? classifyReachable(probe)
-				: proc || hasTrackedWorkers
-					? "unreachable"
-					: "orphan-file";
+			const unverified = unverifiedBySocket.get(socketPath);
+			const status = classifyDiscoveredDaemonStatus({
+				reachable: probe.reachable,
+				protocolVersion: probe.protocolVersion,
+				schemaId: probe.schemaId,
+				version: probe.version,
+				hasIdentifiedProcess: proc !== undefined,
+				hasTrackedWorkers,
+				hasUnverifiedProcess: unverified !== undefined,
+			});
 			return {
 				socketPath,
 				pid,
@@ -388,6 +540,11 @@ export async function discoverDaemons(): Promise<DaemonInfo[]> {
 				sessionCount: probe.sessionCount,
 				status,
 				isDefault: socketPath === defaultSocket,
+				...(unverified && status === "unverified"
+					? {
+							unverifiedReason: `a live process (pid ${unverified.pid}) is registered for this daemon but could not be identified: ${unverified.detail}`,
+						}
+					: {}),
 				...(hasTrackedWorkers ? { hasTrackedWorkers: true } : {}),
 			};
 		}),
@@ -449,6 +606,11 @@ export function planReap(daemons: readonly DaemonInfo[], force: boolean): ReapAc
 	}
 
 	return daemons.map((daemon): ReapAction => {
+		// A live process we could not identify is never a reap target: it may be a
+		// different daemon than the record claims.
+		if (daemon.status === "unverified") {
+			return { kind: "skip", daemon, reason: unverifiedStopReason(daemon) };
+		}
 		// An orphan socket file has no owning process, so removing it is safe even
 		// on the default path (a stale daemon.sock left by a crash). Decide this
 		// before the default guard so a dead default socket still gets cleaned up.
@@ -480,6 +642,11 @@ export function planReap(daemons: readonly DaemonInfo[], force: boolean): ReapAc
 
 export function planShutdownAll(daemons: readonly DaemonInfo[], force: boolean): ReapAction[] {
 	return daemons.map((daemon): ReapAction => {
+		// Reported as a failure, never as "stopped": killing or removing the
+		// endpoint of a process we could not identify would risk the wrong process.
+		if (daemon.status === "unverified") {
+			return { kind: "skip", daemon, reason: unverifiedStopReason(daemon) };
+		}
 		if (daemon.status === "orphan-file") {
 			return { kind: "remove-file", daemon };
 		}
@@ -493,6 +660,10 @@ export function planShutdownAll(daemons: readonly DaemonInfo[], force: boolean):
 		}
 		return { kind: "shutdown", daemon };
 	});
+}
+
+function unverifiedStopReason(daemon: DaemonInfo): string {
+	return `${daemon.unverifiedReason ?? "a live daemon process could not be identified"}; not stopping it`;
 }
 
 const SHUTDOWN_ALL_ACTION_ORDER: Record<ReapAction["kind"], number> = {
