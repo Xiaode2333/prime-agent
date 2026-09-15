@@ -142,6 +142,8 @@ interface GitWorktreeSnapshot {
 interface AutonomousOperationOptions {
 	cwd?: string;
 	signal?: AbortSignal;
+	/** User shell override, so a gate runs in the same shell as the shell tool. */
+	shellPath?: string;
 }
 
 type GateFailure = AgentAutonomousGateFailure;
@@ -447,13 +449,14 @@ export async function refreshAutonomousQualityGates(
 	if (!state.enabled || state.gates.commands.length === 0) {
 		return undefined;
 	}
-	return await runAutonomousQualityGates(state, options.cwd, options.signal);
+	return await runAutonomousQualityGates(state, options.cwd, options.signal, options.shellPath);
 }
 
 async function runAutonomousQualityGates(
 	state: AutonomousRuntimeState,
 	cwd: string | undefined,
 	signal: AbortSignal | undefined,
+	shellPath: string | undefined,
 ): Promise<AutonomousGateResult> {
 	signal?.throwIfAborted();
 	if (!cwd) {
@@ -483,7 +486,7 @@ async function runAutonomousQualityGates(
 		// gate runner on every platform. wrapCommand maps the command's own outcome
 		// onto the process exit code: PowerShell exits 0 for a failed cmdlet and
 		// reports native failures only through $LASTEXITCODE.
-		const gateShell = getShellConfig();
+		const gateShell = getShellConfig(shellPath);
 		const shellCommand = gateShell.wrapCommand ? gateShell.wrapCommand(command) : command;
 		const gateProcess = gateShellSpawn(gateShell, shellCommand);
 		const result = await runChildProcess(gateProcess.file, gateProcess.args, {

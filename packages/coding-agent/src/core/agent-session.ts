@@ -2581,6 +2581,7 @@ export class AgentSession {
 			const decision = await shouldAutonomouslyContinue(this._autonomousState, lastAssistantMessage, {
 				cwd: this._cwd,
 				signal: this.agent.signal,
+				shellPath: this.settingsManager.getShellPath(),
 			});
 			if (!decision.shouldContinue) {
 				this._clearAutonomousContinuationAwait();
@@ -4953,6 +4954,7 @@ export class AgentSession {
 	async refreshAutonomousGates(): Promise<void> {
 		await refreshAutonomousQualityGates(this._autonomousState, {
 			cwd: this._cwd,
+			shellPath: this.settingsManager.getShellPath(),
 		});
 	}
 

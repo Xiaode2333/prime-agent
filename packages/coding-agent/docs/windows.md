@@ -99,6 +99,22 @@ installed. It reports the command's own exit code and keeps the same handle API
 (`poll`, `tail`, `output`, `kill`). Git Bash is used only when `shellPath` points
 at it, and then the kernel keeps the POSIX behaviour.
 
+## Support Status
+
+What works on native Windows, and what does not:
+
+| Area | Status |
+| --- | --- |
+| Install, upgrade, uninstall | `install.ps1` installs the npm release tarball (`-Uninstall` removes it, `-PurgeData` also removes user data). |
+| Shell tool | Windows PowerShell by default, `ComSpec` as fallback, `shellPath` as override. No POSIX shell needed. |
+| Python kernel | Bootstraps with `uv` and runs; the kernel's `bash()` uses the same shell resolution as the shell tool. |
+| `bash()` in the kernel | Windows PowerShell or cmd.exe, with the command's own exit code and the same handle API. |
+| Background services | `prime-agent doctor`, `status`, `ps`, and `shutdown --force` see and stop daemons through the supervisor-owner registry. |
+| Secrets and state | `%USERPROFILE%\.prime` is ACL-hardened on startup (inheritance removed, owner-only grant); a new file inherits the restriction. |
+| Compiled standalone binaries | Not published for Windows. The npm tarball route is the supported install. |
+| Native self-update | Not applicable without a standalone build. Update by re-running `install.ps1`, which resolves the latest stable release. |
+| `shellPath` for gates | Autonomous quality gates follow the same shell resolution as the shell tool, but do not read `shellPath` yet. |
+
 ## Troubleshooting
 
 - `prime-agent` is not recognized after install: open a new terminal, or run `$env:Path = "$env:APPDATA\npm;$env:Path"` for the current session.

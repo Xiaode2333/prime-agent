@@ -28,6 +28,7 @@ type FakeSession = {
 	_goalState: { status: string; objective?: string };
 	_goalAccountingStartedAt: number | undefined;
 	_getGoalContinuationMessages: () => Promise<unknown[]>;
+	settingsManager: { getShellPath: () => string | undefined };
 	_autonomousContinuationSuppressionDepth: number;
 	_autonomousContinuationSuppressedMessages: WeakSet<object>;
 	_hasUnsettledRlmQuiescenceWork: () => boolean;
@@ -73,6 +74,8 @@ function fakeSession(overrides: Partial<FakeSession> = {}): FakeSession {
 		_autonomousContinuationResumeTask: undefined,
 		_lastAssistantMessage: { role: "assistant", stopReason: "stop" },
 		agent: { signal: undefined, state: { messages: [] } },
+		// Gates resolve their shell through the session's setting.
+		settingsManager: { getShellPath: () => undefined },
 		_disposed: false,
 		_disposing: false,
 		_sessionInputAdmissionPauses: new Set(),
