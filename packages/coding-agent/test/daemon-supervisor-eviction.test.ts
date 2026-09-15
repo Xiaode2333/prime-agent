@@ -10,6 +10,7 @@ import { success } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor, idleEvictionSweepIntervalMs } from "../src/modes/daemon/daemon-supervisor.js";
 import { seedSupervisorRoster } from "./fixtures/roster-seed.js";
+import { testSocketPath } from "./socket-path.js";
 
 interface WorkerFixture {
 	descriptor: {
@@ -129,7 +130,7 @@ function makeSupervisor(idleEvictionMinutes: number | "off" = 90): SupervisorInt
 	tempDirs.push(directory);
 	mkdirSync(directory, { recursive: true });
 	writeFileSync(join(directory, "settings.json"), JSON.stringify({ idleEvictionMinutes }));
-	const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+	const supervisor = new DaemonSupervisor(testSocketPath(directory, "daemon.sock"), {
 		defaultSessionConfig: { agentDir: directory, cwd: directory },
 		descriptorDir: join(directory, "workers"),
 	}) as unknown as SupervisorInternals;
@@ -1103,7 +1104,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 		writeFileSync(join(directory, "settings.json"), JSON.stringify({ idleEvictionMinutes: 90 }));
 		const workersDir = join(directory, "workers");
 		mkdirSync(workersDir, { recursive: true });
-		const socketPath = join(directory, "daemon.sock");
+		const socketPath = testSocketPath(directory, "daemon.sock");
 		const { sessionFile, store } = makeScheduledSessionFile("durable-cancel-root");
 		armHeartbeat(store, "durable-cancel-root", sessionFile, now - 10 * 60_000);
 		const bootSupervisor = (): SupervisorInternals => {

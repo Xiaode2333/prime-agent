@@ -26,6 +26,7 @@ import {
 	prepareDaemonUpdateRestart,
 	runDaemonUpdateRestartCoordinator,
 } from "../src/package-manager-cli.js";
+import { normalizeSocketPath } from "../src/utils/daemon-socket-path.js";
 
 interface MockSessionSummary {
 	id: string;
@@ -688,7 +689,8 @@ describe("self-update daemon restart", () => {
 
 		await expect(handlePackageCommand(["update", "--self", "--daemon-socket", customSocketPath])).resolves.toBe(true);
 
-		expect(mockState.probeSocketPaths).toEqual([customSocketPath]);
+		// `--daemon-socket` is stored through normalizeSocketPath, which lower-cases the path on win32.
+		expect(mockState.probeSocketPaths).toEqual([normalizeSocketPath(customSocketPath)]);
 		expect(mockState.calls.some((call) => call.startsWith("spawn:npm "))).toBe(true);
 		expect(mockState.calls.some((call) => call.startsWith("launch-coordinator:"))).toBe(false);
 	});
@@ -946,7 +948,7 @@ describe("self-update daemon restart", () => {
 
 			expect(process.exitCode).toBeUndefined();
 			const spawnIndex = mockState.calls.findIndex((call) => call.startsWith("spawn:npm "));
-			const launchIndex = mockState.calls.indexOf(`launch-coordinator:${mockState.socketPath}`);
+			const launchIndex = mockState.calls.indexOf(`launch-coordinator:${normalizeSocketPath(mockState.socketPath)}`);
 			const fenceIndex = mockState.calls.indexOf("persist-daemon-startup-fence");
 			const prepareIndex = mockState.calls.indexOf("daemon-request:prepare_update_restart");
 			const admissionIndex = mockState.calls.indexOf("acquire-daemon-shutdown-admission");
@@ -964,7 +966,11 @@ describe("self-update daemon restart", () => {
 			expect(releaseAdmissionIndex).toBeGreaterThan(startupFenceIndex);
 			expect(ensureIndex).toBeGreaterThan(releaseAdmissionIndex);
 			expect(ensureIndex).toBeGreaterThan(shutdownIndex);
-			expect(statSync(join(agentDir, "update-restarts", "test-status.json")).mode & 0o777).toBe(0o600);
+			// POSIX-only assertion: Windows has no mode bits, so chmod only toggles the read-only
+			// flag and statSync reports 0o666. The ordering assertions above still run on Windows.
+			if (process.platform !== "win32") {
+				expect(statSync(join(agentDir, "update-restarts", "test-status.json")).mode & 0o777).toBe(0o600);
+			}
 		} finally {
 			errorSpy.mockRestore();
 			logSpy.mockRestore();

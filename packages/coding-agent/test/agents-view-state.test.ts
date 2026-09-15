@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntimeConfig } from "../src/core/agent-session-config.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
+import { canonicalSessionPath } from "../src/core/session-lease.js";
 import type { SessionInfo } from "../src/core/session-manager.js";
 import type { SettingsManager } from "../src/core/settings-manager.js";
 import {
@@ -56,6 +57,14 @@ import { formatAgentDepthLabel } from "../src/modes/interactive/interactive-mode
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
 import type { Theme } from "../src/modes/interactive/theme/theme.js";
 import * as paths from "../src/utils/paths.js";
+
+/**
+ * Session identities use the canonical on-disk path (`file:<path>`), which is platform-specific:
+ * a POSIX literal such as `/tmp/saved.jsonl` resolves to `C:\tmp\saved.jsonl` on Windows.
+ */
+function fileIdentityFor(sessionFile: string): string {
+	return `file:${canonicalSessionPath(sessionFile)}`;
+}
 
 function heartbeat(id: string, nextRunAt?: string, activeSessionId = "child", status: "active" | "paused" = "active") {
 	return {
@@ -1537,7 +1546,12 @@ describe("agents view state", () => {
 		});
 
 		const [record] = reconcileUnifiedSessions([daemon], [saved]);
-		expect(record).toMatchObject({ daemon, saved, identity: "file:/tmp/sessions/merged.jsonl", section: "idle" });
+		expect(record).toMatchObject({
+			daemon,
+			saved,
+			identity: fileIdentityFor("/tmp/sessions/merged.jsonl"),
+			section: "idle",
+		});
 		expect(record?.searchableText).toContain("uniquely searchable transcript");
 		expect(record?.searchableText).toContain("lunar regression");
 		expect(buildAgentsViewRows([record!])[0]).toMatchObject({
@@ -1756,9 +1770,9 @@ describe("agents view state", () => {
 		const enriched = enrichedRecords.find((record) => record.daemon?.sessionId === parent.sessionId);
 		const expanded = buildAgentsViewRows(enrichedRecords, new Set([live!.identity]), new Set([live!.identity]));
 
-		expect(inactive).toMatchObject({ identity: "file:/tmp/saved.jsonl", section: "inactive" });
+		expect(inactive).toMatchObject({ identity: fileIdentityFor("/tmp/saved.jsonl"), section: "inactive" });
 		expect(enriched).toMatchObject({ identity: live?.identity, section: "idle", saved });
-		expect(enriched?.identityAliases).toContain("file:/tmp/saved.jsonl");
+		expect(enriched?.identityAliases).toContain(fileIdentityFor("/tmp/saved.jsonl"));
 		expect(expanded.map((row) => row.kind)).toContain("subagent-code");
 		expect(expanded.some((row) => row.kind === "subagent" && row.summary.sessionId === "child-session")).toBe(true);
 	});

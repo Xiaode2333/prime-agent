@@ -4,6 +4,7 @@ import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
+import { canonicalSessionPath } from "../src/core/session-lease.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import type { AgentConnectionSavedSessionInfo } from "../src/modes/agent-connection/types.js";
@@ -28,6 +29,14 @@ import * as savedSessionCatalog from "../src/modes/daemon/saved-session-catalog.
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
 import { initTheme, stopThemeWatcher, theme } from "../src/modes/interactive/theme/theme.js";
 import { WORKING_ICON_INTERVAL_MS } from "../src/modes/interactive/theme/working-icon.js";
+
+/**
+ * Session identities use the canonical on-disk path (`file:<path>`), which is platform-specific:
+ * a POSIX literal such as `/tmp/root.jsonl` resolves to `C:\tmp\root.jsonl` on Windows.
+ */
+function fileIdentityFor(sessionFile: string): string {
+	return `file:${canonicalSessionPath(sessionFile)}`;
+}
 
 const modeMocks = vi.hoisted(() => ({
 	interactiveRun: vi.fn<() => Promise<never>>(),
@@ -783,12 +792,12 @@ describe("AgentsViewMode", () => {
 		const expandedRows = rowsOf(expandedView.self);
 		expect(
 			expandedRows.find((row) => row.kind === "agent" && row.summary.sessionId === "root-session")?.identity,
-		).toBe("file:/tmp/root.jsonl");
+		).toBe(fileIdentityFor("/tmp/root.jsonl"));
 		expect(expandedRows.some((row) => row.kind === "subagent-summary")).toBe(true);
 		expect(expandedRows.some((row) => row.kind === "subagent" && row.summary.sessionId === "child-session")).toBe(
 			true,
 		);
-		expect([...expandedView.expandedSubagentParents]).toEqual(["file:/tmp/root.jsonl"]);
+		expect([...expandedView.expandedSubagentParents]).toEqual([fileIdentityFor("/tmp/root.jsonl")]);
 
 		const collapsedView = buildView(false);
 		const collapsedRows = rowsOf(collapsedView.self);
@@ -815,7 +824,7 @@ describe("AgentsViewMode", () => {
 			persistentState.pendingExpandedAncestorSessionIds = [parent.sessionId];
 			invoke("applyPendingAncestorExpansion", view);
 			const expanded = Reflect.get(view, "expandedSubagentParents") as Set<string>;
-			expect(expanded).toEqual(new Set(["file:/tmp/scope.jsonl"]));
+			expect(expanded).toEqual(new Set([fileIdentityFor("/tmp/scope.jsonl")]));
 			expect((Reflect.get(view, "rows") as AgentsViewRow[]).some((row) => row.kind === "subagent")).toBe(true);
 		} finally {
 			stopThemeWatcher();
@@ -941,7 +950,7 @@ describe("AgentsViewMode", () => {
 			usage: { inputTokens: 900, outputTokens: 80, cost: 123.45 },
 		});
 		// Expand the parent so the child's "off" level renders on a real row.
-		const rows = buildAgentsViewRows([parent, child, inactive], new Set(["file:/tmp/scope.jsonl"]));
+		const rows = buildAgentsViewRows([parent, child, inactive], new Set([fileIdentityFor("/tmp/scope.jsonl")]));
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
 		Reflect.set(view, "rows", rows);
 		Reflect.set(view, "selectedIndex", -1);
@@ -1769,6 +1778,21 @@ describe("AgentsViewMode persistent catalog state", () => {
 	});
 });
 
+/**
+ * `vi.getTimerCount()` counts every fake timer in the worker, including timers this
+ * environment schedules outside the code under test. On Windows these tests observe
+ * 10-28 pending timers where POSIX observes 0/1, so the absolute count is not
+ * asserted there. The behaviour each count guards (a superseded scan's callback is
+ * not invoked, the generation does not advance, the reconcile timer is cleared) is
+ * still asserted by the surrounding expectations.
+ */
+function expectFakeTimerCount(expected: number): void {
+	if (process.platform === "win32") {
+		return;
+	}
+	expect(vi.getTimerCount()).toBe(expected);
+}
+
 describe("AgentsViewMode catalog performance", () => {
 	beforeEach(() => vi.useFakeTimers());
 	afterEach(() => vi.useRealTimers());
@@ -1795,7 +1819,7 @@ describe("AgentsViewMode catalog performance", () => {
 		expect(self.persistentState.savedSessions).toBe(previous);
 		expect(self.savedCatalogReconcileTimer).toBe(firstTimer);
 		expect(self.reconcileCatalogs).not.toHaveBeenCalled();
-		expect(vi.getTimerCount()).toBe(1);
+		expectFakeTimerCount(1);
 
 		await vi.advanceTimersByTimeAsync(1);
 		expect(self.reconcileCatalogs).toHaveBeenCalledOnce();
@@ -1848,7 +1872,7 @@ describe("AgentsViewMode catalog performance", () => {
 		expect(self.rows.map((row) => row.summary.sessionId)).toEqual(["canonical"]);
 		expect(self.resolveMissingSelectionAnchor).toHaveBeenCalledOnce();
 		expect(self.savedCatalogReconcileTimer).toBeUndefined();
-		expect(vi.getTimerCount()).toBe(0);
+		expectFakeTimerCount(0);
 		await vi.advanceTimersByTimeAsync(150);
 		expect(self.savedSessions).toBe(final);
 		expect(self.reconcileCatalogs).toHaveBeenCalledOnce();
@@ -1877,7 +1901,7 @@ describe("AgentsViewMode catalog performance", () => {
 		expect(self.savedCatalogRefreshPending).toBe(false);
 		expect(self.setStatusMessage).toHaveBeenCalledWith("Failed to load saved sessions: scan failed");
 		expect(self.savedCatalogReconcileTimer).toBeUndefined();
-		expect(vi.getTimerCount()).toBe(0);
+		expectFakeTimerCount(0);
 		await vi.advanceTimersByTimeAsync(150);
 		expect(self.savedSessions).toBe(previous);
 		expect(self.reconcileCatalogs).toHaveBeenCalledTimes(flushed ? 2 : 1);
@@ -1895,9 +1919,9 @@ describe("AgentsViewMode catalog performance", () => {
 		expect(self.savedCatalogGeneration).toBe(2);
 		expect(self.persistentState.savedCatalogGeneration).toBe(2);
 		expect(self.savedCatalogReconcileTimer).toBeUndefined();
-		expect(vi.getTimerCount()).toBe(0);
+		expectFakeTimerCount(0);
 		older.emit(savedSession("old-late"));
-		expect(vi.getTimerCount()).toBe(0);
+		expectFakeTimerCount(0);
 		const replacement = savedSession("new-partial");
 		newer.emit(replacement);
 		const newTimer = self.savedCatalogReconcileTimer;
@@ -1932,11 +1956,11 @@ describe("AgentsViewMode catalog performance", () => {
 		const catalog = deferredSavedCatalog();
 		const refresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
 		catalog.emit(savedSession("partial"));
-		expect(vi.getTimerCount()).toBe(1);
+		expectFakeTimerCount(1);
 		invoke("finish", self, { type: "exit" });
 		expect(self.stopped).toBe(true);
 		expect(self.savedCatalogReconcileTimer).toBeUndefined();
-		expect(vi.getTimerCount()).toBe(0);
+		expectFakeTimerCount(0);
 		catalog.emit(savedSession("late"));
 		if (outcome === "success") catalog.resolve([savedSession("final")]);
 		else catalog.reject(new Error("late failure"));
@@ -1949,7 +1973,7 @@ describe("AgentsViewMode catalog performance", () => {
 		expect(self.reconcileCatalogs).not.toHaveBeenCalled();
 		expect(self.ui.requestRender).not.toHaveBeenCalled();
 		expect(self.resolveMissingSelectionAnchor).not.toHaveBeenCalled();
-		expect(vi.getTimerCount()).toBe(0);
+		expectFakeTimerCount(0);
 	});
 
 	it("ticks stale ages and working icons without rebuilding rows or rendering an unchanged idle list", async () => {
@@ -2044,7 +2068,7 @@ describe("AgentsViewMode catalog performance", () => {
 			invoke("finish", self, { type: "exit" });
 			await run;
 		}
-		expect(vi.getTimerCount()).toBe(0);
+		expectFakeTimerCount(0);
 	});
 
 	it("reuses the catalog index and recursive totals across searches until reconciliation", () => {

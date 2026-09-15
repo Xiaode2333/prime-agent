@@ -5,8 +5,13 @@ import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ReplKernelManager } from "../src/core/kernel/index.js";
 
-const runtimePython = resolve("../../prime-agent-runtime/.venv/bin/python");
-const fallbackPython = join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python");
+/** Windows virtualenvs keep the interpreter in `Scripts/python.exe`, not `bin/python`. */
+function venvPython(venvDir: string): string {
+	return process.platform === "win32" ? join(venvDir, "Scripts", "python.exe") : join(venvDir, "bin", "python");
+}
+
+const runtimePython = venvPython(resolve("../../prime-agent-runtime/.venv"));
+const fallbackPython = venvPython(join(homedir(), ".prime", "agent", "kernel-venv"));
 
 function resolveKernelPython(): string | null {
 	for (const python of [process.env.PRIME_AGENT_KERNEL_PYTHON, runtimePython, fallbackPython]) {

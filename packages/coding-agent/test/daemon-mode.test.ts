@@ -17,6 +17,7 @@ import {
 import fsPromises from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { createServer, type Server, type Socket } from "node:net";
+import { testSocketPath } from "./socket-path.js";
 
 /** Close a fake supervisor and destroy lingering worker connections (persistent supervisor links keep sockets open). */
 function closeFakeSupervisor(server: Server, sockets: Set<Socket>): Promise<void> {
@@ -1874,7 +1875,7 @@ describe("daemon mode helpers", () => {
 		"creates and prompts a resident depth-0 session with $label",
 		async ({ provider, configuredProvider, runtimeKey, envKey, stale }) => {
 			const tempDir = mkdtempSync(join(tmpdir(), "pa-root-session-"));
-			const socketPath = join(tempDir, "supervisor.sock");
+			const socketPath = testSocketPath(tempDir, "supervisor.sock");
 			const commands: Array<Record<string, unknown>> = [];
 			const sockets = new Set<Socket>();
 			const server: Server = createServer((socket) => {
@@ -2042,7 +2043,7 @@ describe("daemon mode helpers", () => {
 
 	it("does not prompt or guess a cleanup target after a create response timeout", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pa-root-timeout-"));
-		const socketPath = join(tempDir, "supervisor.sock");
+		const socketPath = testSocketPath(tempDir, "supervisor.sock");
 		const commands: Array<Record<string, unknown>> = [];
 		const sockets = new Set<Socket>();
 		const server = createServer((socket) => {
@@ -2292,7 +2293,7 @@ describe("daemon mode helpers", () => {
 
 	it("does not retry supervisor agent-message rejections", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pa-msg-"));
-		const socketPath = join(tempDir, "d.sock");
+		const socketPath = testSocketPath(tempDir, "d.sock");
 		let connectionCount = 0;
 		const sockets = new Set<Socket>();
 		const server: Server = createServer((socket) => {
@@ -2370,7 +2371,7 @@ describe("daemon mode helpers", () => {
 
 	it("does not retry after the supervisor receives an agent message", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pa-msg-disconnect-"));
-		const socketPath = join(tempDir, "d.sock");
+		const socketPath = testSocketPath(tempDir, "d.sock");
 		let requestCount = 0;
 		const sockets = new Set<Socket>();
 		const server: Server = createServer((socket) => {
@@ -2452,7 +2453,7 @@ describe("daemon mode helpers", () => {
 
 	it("routes worker-local session renames through the supervisor", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pa-worker-rename-"));
-		const socketPath = join(tempDir, "s");
+		const socketPath = testSocketPath(tempDir, "s");
 		let receivedCommand: Record<string, unknown> | undefined;
 		let releaseResponse: () => void = () => {};
 		const responseGate = new Promise<void>((resolve) => {
@@ -2536,7 +2537,7 @@ describe("daemon mode helpers", () => {
 
 	it("does not retry permanent ambiguity errors from the supervisor", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pa-ambiguous-"));
-		const socketPath = join(tempDir, "s");
+		const socketPath = testSocketPath(tempDir, "s");
 		let requestCount = 0;
 		const sockets = new Set<Socket>();
 		const server = createServer((socket) => {
@@ -7528,42 +7529,49 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
-	// chmod-based read-only dirs don't block root, so skip when running as uid 0.
-	it.skipIf(process.getuid?.() === 0)("does not fail a deletion when the artifact dir cannot be removed", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-artifact-rm-failure-"));
-		let lockedRoot: string | undefined;
-		try {
-			const fixture = makePersistedRlmDaemonFixture(tempDir);
-			const nestedArtifactsRoot = resolve(fixture.childArtifactDir, "..");
-			const internals = fixture.daemon as unknown as {
-				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
-				createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
-			};
-			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
-			chmodSync(nestedArtifactsRoot, 0o555);
-			lockedRoot = nestedArtifactsRoot;
+	// chmod-based read-only dirs don't block root, so skip when running as uid 0; Windows has no
+	// POSIX mode bits at all, so a chmod 0o555 dir is still deletable and the scenario cannot exist.
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"does not fail a deletion when the artifact dir cannot be removed",
+		async () => {
+			const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-artifact-rm-failure-"));
+			let lockedRoot: string | undefined;
+			try {
+				const fixture = makePersistedRlmDaemonFixture(tempDir);
+				const nestedArtifactsRoot = resolve(fixture.childArtifactDir, "..");
+				const internals = fixture.daemon as unknown as {
+					createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+					createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
+				};
+				const parentState = await internals.createRuntime({
+					type: "create",
+					sessionPath: fixture.parentSessionFile,
+				});
+				chmodSync(nestedArtifactsRoot, 0o555);
+				lockedRoot = nestedArtifactsRoot;
 
-			// Cache cleanup is best-effort: the rm failure must not surface.
-			await internals.createSubagentRuntimeHost(parentState).deleteRlmSubagentRuntime(fixture.childId);
+				// Cache cleanup is best-effort: the rm failure must not surface.
+				await internals.createSubagentRuntimeHost(parentState).deleteRlmSubagentRuntime(fixture.childId);
 
-			expect(existsSync(fixture.childArtifactDir)).toBe(true);
-			// Both tombstones are still durable.
-			const display = JSON.parse(readFileSync(join(fixture.childSessionDir, "rlm-subagent.json"), "utf8")) as {
-				status: string;
-			};
-			expect(display).toMatchObject({ status: "deleted" });
-			const ledgerFile = readdirSync(join(tempDir, "rlm-ledger")).find((name) => name.endsWith(".jsonl"));
-			if (!ledgerFile) throw new Error("Missing RLM ledger file");
-			const ledgerOps = readFileSync(join(tempDir, "rlm-ledger", ledgerFile), "utf8")
-				.trim()
-				.split(/\r?\n/)
-				.map((line) => JSON.parse(line) as { op: string; childId?: string });
-			expect(ledgerOps.some((record) => record.op === "delete" && record.childId === fixture.childId)).toBe(true);
-		} finally {
-			if (lockedRoot) chmodSync(lockedRoot, 0o755);
-			rmSync(tempDir, { recursive: true, force: true });
-		}
-	});
+				expect(existsSync(fixture.childArtifactDir)).toBe(true);
+				// Both tombstones are still durable.
+				const display = JSON.parse(readFileSync(join(fixture.childSessionDir, "rlm-subagent.json"), "utf8")) as {
+					status: string;
+				};
+				expect(display).toMatchObject({ status: "deleted" });
+				const ledgerFile = readdirSync(join(tempDir, "rlm-ledger")).find((name) => name.endsWith(".jsonl"));
+				if (!ledgerFile) throw new Error("Missing RLM ledger file");
+				const ledgerOps = readFileSync(join(tempDir, "rlm-ledger", ledgerFile), "utf8")
+					.trim()
+					.split(/\r?\n/)
+					.map((line) => JSON.parse(line) as { op: string; childId?: string });
+				expect(ledgerOps.some((record) => record.op === "delete" && record.childId === fixture.childId)).toBe(true);
+			} finally {
+				if (lockedRoot) chmodSync(lockedRoot, 0o755);
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("still sweeps and resolves when scheduled-job cancellation throws", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-artifact-cancel-throw-"));
