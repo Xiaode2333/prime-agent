@@ -14,6 +14,7 @@ import { success } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import { seedSupervisorRoster } from "./fixtures/roster-seed.js";
+import { testSocketPath } from "./socket-path.js";
 
 interface SupervisorInternals {
 	workers: Map<string, WorkerFixture>;
@@ -766,7 +767,8 @@ describe("daemon supervisor passive subagent topology", () => {
 	it("dispatches authenticated peer queries and excludes disconnected workers", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-passive-peers-"));
 		tempDirs.push(directory);
-		const socketPath = join(directory, "daemon.sock");
+		// Windows accepts only a named pipe as a listen endpoint; a POSIX-style path fails with EACCES.
+		const socketPath = testSocketPath(directory, "daemon.sock");
 		const supervisor = new DaemonSupervisor(socketPath, {
 			defaultSessionConfig: { agentDir: directory, cwd: directory },
 			descriptorDir: join(directory, "workers"),

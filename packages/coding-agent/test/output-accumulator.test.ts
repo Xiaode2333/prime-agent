@@ -6,23 +6,33 @@ import { executeBashWithOperations } from "../src/core/bash-executor.js";
 import type { BashOperations } from "../src/core/tools/bash.js";
 import { OutputAccumulator } from "../src/core/tools/output-accumulator.js";
 
+// os.tmpdir() reads TMPDIR on POSIX and TMP/TEMP on Windows, so a fixture that
+// wants the spill to target a bad directory must set the names for this platform.
+const TEMP_DIR_ENV_VARS = ["TMPDIR", "TMP", "TEMP"] as const;
+
+function pointTempDirAt(path: string): void {
+	for (const name of TEMP_DIR_ENV_VARS) process.env[name] = path;
+}
+
 describe("OutputAccumulator temp spill", () => {
-	let realTmp: string | undefined;
+	let savedTempEnv: Record<string, string | undefined>;
 	let scratch: string;
 
 	beforeEach(() => {
 		scratch = mkdtempSync(join(tmpdir(), "pi-accumulator-"));
-		realTmp = process.env.TMPDIR;
+		savedTempEnv = Object.fromEntries(TEMP_DIR_ENV_VARS.map((name) => [name, process.env[name]]));
 	});
 
 	afterEach(() => {
-		if (realTmp === undefined) delete process.env.TMPDIR;
-		else process.env.TMPDIR = realTmp;
+		for (const name of TEMP_DIR_ENV_VARS) {
+			if (savedTempEnv[name] === undefined) delete process.env[name];
+			else process.env[name] = savedTempEnv[name];
+		}
 		rmSync(scratch, { recursive: true, force: true });
 	});
 
 	it("degrades a failed spill to the in-memory tail without failing the close", async () => {
-		process.env.TMPDIR = join(scratch, "does-not-exist");
+		pointTempDirAt(join(scratch, "does-not-exist"));
 		const accumulator = new OutputAccumulator({ maxBytes: 8, maxLines: 100 });
 		accumulator.append(Buffer.from("0123456789abcdef\n"));
 		accumulator.append(Buffer.from("tail\n"));
@@ -36,10 +46,10 @@ describe("OutputAccumulator temp spill", () => {
 	});
 
 	it("swallows spill-cleanup failures, keeping the tail and the process", async () => {
-		// TMPDIR is a FILE: the open fails ENOTDIR and so does the cleanup rm.
+		// The temp directory is a FILE: the open fails ENOTDIR and so does the cleanup rm.
 		const blocker = join(scratch, "not-a-dir");
 		writeFileSync(blocker, "x");
-		process.env.TMPDIR = blocker;
+		pointTempDirAt(blocker);
 		const accumulator = new OutputAccumulator({ maxBytes: 8, maxLines: 100 });
 		accumulator.append(Buffer.from("0123456789abcdef\n"));
 		accumulator.append(Buffer.from("tail\n"));

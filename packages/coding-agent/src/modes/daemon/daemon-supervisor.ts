@@ -1406,7 +1406,10 @@ export class DaemonSupervisor {
 			if (
 				parsed.version !== 1 ||
 				typeof parsed.socketPath !== "string" ||
-				normalizeSocketPath(parsed.socketPath) !== this.socketPath ||
+				// Both sides must be normalized: a raw record path and this.socketPath can be
+				// the same endpoint in different spellings (mixed case on Windows), and the
+				// persisted host settings would then be silently ignored.
+				normalizeSocketPath(parsed.socketPath) !== normalizeSocketPath(this.socketPath) ||
 				!parsed.defaultSessionConfig ||
 				typeof parsed.defaultSessionConfig !== "object" ||
 				typeof parsed.defaultSessionConfig.agentDir !== "string"

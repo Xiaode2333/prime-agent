@@ -41,6 +41,7 @@ import {
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 	DAEMON_WORKER_TOKEN_ENV,
 } from "../../src/modes/daemon/daemon-worker-protocol.js";
+import { testSocketPath } from "../socket-path.js";
 
 const cliPath = resolve(__dirname, "../../src/cli.ts");
 const tsxPath = resolve(__dirname, "../../../../node_modules/tsx/dist/cli.mjs");
@@ -160,7 +161,8 @@ describe("Real-process serializedRefine — JSON mode", () => {
 		tempRoots.add(root);
 		const agentDir = join(root, "agent");
 		mkdirSync(agentDir, { recursive: true });
-		const socketPath = join(root, "daemon.sock");
+		// Windows accepts only a named pipe as a listen endpoint; a POSIX-style path fails with EACCES.
+		const socketPath = testSocketPath(root, "daemon.sock");
 		daemonSockets.add(socketPath);
 		const eventLogPath = join(root, "events.jsonl");
 
@@ -207,8 +209,15 @@ describe("Real-process serializedRefine — JSON mode", () => {
 		expect(result).toMatchObject({ code: 0, signal: null });
 		expect(result.stderr).not.toContain("Timed out waiting for daemon");
 
-		// Daemon socket exists — the daemon path was used.
-		expect(existsSync(socketPath)).toBe(true);
+		// The daemon endpoint is real: a POSIX socket file exists on disk, while a
+		// Windows named pipe only proves itself by accepting a client connect.
+		if (process.platform === "win32") {
+			const probe = new DaemonClient(socketPath);
+			await probe.connect(2000);
+			probe.close();
+		} else {
+			expect(existsSync(socketPath)).toBe(true);
+		}
 
 		// Read the event log recorded by the extension in the real worker.
 		const events = readEventLog(eventLogPath);

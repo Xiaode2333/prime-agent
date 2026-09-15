@@ -19,6 +19,7 @@ import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js"
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import { RlmSpawnLedger } from "../src/modes/daemon/rlm-ledger.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
+import { testSocketPath } from "./socket-path.js";
 
 const tempDirs: string[] = [];
 
@@ -251,7 +252,8 @@ describe("supervisor roster subscription", () => {
 	it("seeds, coalesces, skips unsubscribed clients, and feeds the chat bar over one real socket", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-roster-push-"));
 		tempDirs.push(directory);
-		const socketPath = join(directory, "daemon.sock");
+		// Windows can only listen on a named pipe; a POSIX path fails with EACCES.
+		const socketPath = testSocketPath(directory);
 		const supervisor = new DaemonSupervisor(socketPath, {
 			defaultSessionConfig: { agentDir: directory, cwd: directory },
 			descriptorDir: join(directory, "workers"),

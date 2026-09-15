@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { getModel } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAgentSession } from "../src/core/sdk.js";
@@ -40,7 +40,7 @@ describe("createAgentSession session manager defaults", () => {
 		const sessionFile = session.sessionManager.getSessionFile();
 
 		expect(sessionDir).toBe(expectedSessionDir);
-		expect(sessionFile?.startsWith(`${expectedSessionDir}/`)).toBe(true);
+		expect(sessionFile?.startsWith(`${expectedSessionDir}${sep}`)).toBe(true);
 
 		session.dispose();
 	});
@@ -78,7 +78,8 @@ describe("createAgentSession session manager defaults", () => {
 		});
 
 		expect(session.sessionManager).toBe(sessionManager);
-		expect(session.systemPrompt).toContain(`Working directory: ${sessionCwd}`);
+		// The prompt renders every directory with forward slashes on all platforms.
+		expect(session.systemPrompt).toContain(`Working directory: ${sessionCwd.replace(/\\/g, "/")}`);
 
 		const ipythonTool = session.agent.state.tools.find((tool) => tool.name === "ipython");
 		expect(ipythonTool).toBeTruthy();
@@ -90,6 +91,8 @@ describe("createAgentSession session manager defaults", () => {
 
 		expect(realpathSync(output.trim())).toBe(realpathSync(sessionCwd));
 
-		session.dispose();
+		// The sync dispose() leaves the kernel process running; on Windows its cwd
+		// inside the temp tree blocks the afterEach rmSync with EPERM.
+		await session.disposeAsync();
 	}, 120_000);
 });

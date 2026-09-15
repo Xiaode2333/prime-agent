@@ -5,6 +5,7 @@ import { join, win32 } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getProcessStartId } from "../src/core/session-lease.js";
 import { AgentDaemon, supervisorLaunchLockPath } from "../src/modes/daemon/daemon-mode.js";
+import { normalizeSocketPath } from "../src/modes/daemon/daemon-socket.js";
 import * as childProcesses from "../src/utils/child-process.js";
 
 interface Claim {
@@ -70,7 +71,10 @@ function installClaim(daemon: Launcher, socketPath: string, child: ChildProcess)
 		generation,
 		pid,
 		processStartId,
-		socketPath,
+		// Production writes owner records through normalizeSocketPath; a hand-written
+		// record must carry the same identity or the claim comparison rejects it on
+		// Windows, where normalization folds case and separators.
+		socketPath: normalizeSocketPath(socketPath),
 		descriptorDir: directory,
 		agentDir: directory,
 		appVersion: "test",
@@ -132,6 +136,8 @@ describe("supervisor replacement launch ownership", () => {
 		if (ownWins) expect(kill).not.toHaveBeenCalled();
 		else {
 			expect(kill).toHaveBeenCalledOnce();
+			// Node reports the requested signal name here on every platform: the losing
+			// supervisor is killed through child.kill("SIGKILL"), not through taskkill.
 			expect(child.signalCode).toBe("SIGKILL");
 			expect(winnerKill).not.toHaveBeenCalled();
 		}

@@ -59,9 +59,20 @@ afterEach(() => {
 	}
 });
 
-function createNpmPrefixInstall(template = "pi-prefix-"): { prefix: string; packageDir: string } {
+/**
+ * Build a fake global npm prefix. npm reports `<prefix>/lib/node_modules` on POSIX
+ * and `<prefix>/node_modules` on Windows, so a test that lets the product ask the
+ * real npm for the root has to build the layout npm reports on this platform.
+ */
+function createNpmPrefixInstall(
+	template = "pi-prefix-",
+	options: { nativeNpmLayout?: boolean } = {},
+): { prefix: string; packageDir: string } {
 	const prefix = mkdtempSync(join(tmpdir(), template));
-	const root = join(prefix, "lib", "node_modules");
+	const root =
+		options.nativeNpmLayout && process.platform === "win32"
+			? join(prefix, "node_modules")
+			: join(prefix, "lib", "node_modules");
 	const scopeDir = join(root, "@earendil-works");
 	const packageDir = join(scopeDir, "pi-coding-agent");
 	mkdirSync(packageDir, { recursive: true });
@@ -273,7 +284,9 @@ describe("detectInstallMethod", () => {
 	});
 
 	test("self-update respects configured npmCommand", () => {
-		const { prefix } = createNpmPrefixInstall();
+		// A configured npmCommand makes the product ask the real npm for this prefix's
+		// root, so the fixture uses the layout npm reports on this platform.
+		const { prefix } = createNpmPrefixInstall("pi-prefix-", { nativeNpmLayout: true });
 
 		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent", ["npm", "--prefix", prefix]);
 
@@ -311,6 +324,8 @@ describe("detectInstallMethod", () => {
 		);
 	});
 
+	// The fixture fakes bun with a `.cmd` shim; `bun` is listed in
+	// WINDOWS_SHELL_COMMANDS so the product routes that shim through a shell.
 	test("self-updates bun global installs from bun pm bin", () => {
 		createBunGlobalInstall();
 
@@ -399,7 +414,9 @@ describe("detectInstallMethod", () => {
 		});
 	});
 
-	test("does not self-update when npm install path is not writable", () => {
+	// POSIX-only: chmod does not make a directory unwritable on Windows (mode bits are
+	// not access control there), so the product correctly reports a writable path.
+	test.skipIf(process.platform === "win32")("does not self-update when npm install path is not writable", () => {
 		const { packageDir } = createNpmPrefixInstall();
 		chmodSync(packageDir, 0o500);
 

@@ -675,7 +675,10 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 			const repaired = readFileSync(realFile, "utf-8");
 			expect(repaired.endsWith("\n")).toBe(true);
 			expect(repaired).not.toContain("torn");
-			expect(statSync(realFile).mode & 0o777).toBe(0o600);
+			if (process.platform !== "win32") {
+				// Mode bits are not access control on Windows; the ACL hardening covers it.
+				expect(statSync(realFile).mode & 0o777).toBe(0o600);
+			}
 		} finally {
 			errorSpy.mockRestore();
 		}

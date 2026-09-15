@@ -101,8 +101,11 @@ describe("rlm spawn ledger", () => {
 			const lines = readFileSync(ledger.ledgerPath, "utf8").trim().split("\n");
 			expect(JSON.parse(lines[0])).toMatchObject({ v: 1, op: "meta", sessionsDir: realpathSync(sessionsDir) });
 			expect(JSON.parse(lines[4])).toMatchObject({ v: 1, op: "delete", reason: "revoked" });
-			expect(statSync(ledger.ledgerPath).mode & 0o777).toBe(0o600);
-			expect(statSync(dirname(ledger.ledgerPath)).mode & 0o777).toBe(0o700);
+			if (process.platform !== "win32") {
+				// Mode bits are not access control on Windows; the ACL hardening covers it.
+				expect(statSync(ledger.ledgerPath).mode & 0o777).toBe(0o600);
+				expect(statSync(dirname(ledger.ledgerPath)).mode & 0o777).toBe(0o700);
+			}
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

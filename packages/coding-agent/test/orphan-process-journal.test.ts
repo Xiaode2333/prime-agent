@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,25 @@ import {
 	shouldReapOrphanProcess,
 } from "../src/core/orphan-process-journal.js";
 import { getProcessStartId } from "../src/core/session-lease.js";
+
+/**
+ * Stands in for a detached bash() child. `sleep` does not exist on Windows, so
+ * the child is this Node interpreter with a long-lived interval instead: it must
+ * stay alive until the reaper (or the test) kills it on either platform.
+ */
+function spawnDetachedOrphanChild(): ChildProcess {
+	return spawn(process.execPath, ["--eval", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+}
+
+/** Windows has no catchable signals: a killed child reports an exit code, not a signal name. */
+function expectOrphanChildKilled(child: ChildProcess): void {
+	if (process.platform === "win32") {
+		expect(child.signalCode).toBeNull();
+		expect(child.exitCode).not.toBeNull();
+	} else {
+		expect(child.signalCode).toBe("SIGKILL");
+	}
+}
 
 const tempDirs: string[] = [];
 const originalJournalPath = process.env[ORPHAN_PROCESS_JOURNAL_ENV];
@@ -55,8 +74,8 @@ describe("orphan process journal", () => {
 		const path = join(directory, "orphans.jsonl");
 		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = path;
 
-		// Stands in for a detached bash() child: own session so SIGKILL of the group is observable.
-		const child = spawn("sleep", ["300"], { detached: true, stdio: "ignore" });
+		// Stands in for a detached bash() child: own session so the kill is observable.
+		const child = spawnDetachedOrphanChild();
 		child.unref();
 		const childPid = child.pid;
 		expect(childPid).toBeTypeOf("number");
@@ -86,7 +105,7 @@ describe("orphan process journal", () => {
 
 		const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
 		await exited;
-		expect(child.signalCode).toBe("SIGKILL");
+		expectOrphanChildKilled(child);
 		const remaining = readActiveOrphanProcesses(path, process.pid).map((orphan) => orphan.pid);
 		expect(remaining).not.toContain(childPid);
 		expect(remaining).toContain(process.pid);
@@ -120,37 +139,43 @@ describe("orphan process journal", () => {
 		expect(readActiveOrphanProcesses(path, process.pid)).toEqual([]);
 	});
 
-	// POSIX behavior: CI runs Ubuntu, so this exercises the real kill path.
-	it("best-effort kills pid-only records in the kernel crash-reap path", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "prime-orphan-journal-test-"));
-		tempDirs.push(directory);
-		const path = join(directory, "orphans.jsonl");
-		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = path;
+	// POSIX behavior: CI runs Ubuntu, so this exercises the real kill path. Vitest 4's
+	// skipIf takes no reason argument. win32 deliberately skips identity-free records
+	// (shouldReapOrphanProcess): the kernel's kill-on-close job already reaped the tree,
+	// so a bare-pid taskkill could only hit a reused pid.
+	it.skipIf(process.platform === "win32")(
+		"best-effort kills pid-only records in the kernel crash-reap path",
+		async () => {
+			const directory = mkdtempSync(join(tmpdir(), "prime-orphan-journal-test-"));
+			tempDirs.push(directory);
+			const path = join(directory, "orphans.jsonl");
+			process.env[ORPHAN_PROCESS_JOURNAL_ENV] = path;
 
-		const child = spawn("sleep", ["300"], { detached: true, stdio: "ignore" });
-		child.unref();
-		const childPid = child.pid;
-		expect(childPid).toBeTypeOf("number");
-		const kernelPid = 999_999;
-		// Pid-only record: the kernel crashed before the start-id query landed.
-		appendFileSync(
-			path,
-			`${JSON.stringify({
-				version: 1,
-				pid: childPid,
-				ownerPid: process.pid,
-				kernelPid,
-				active: true,
-				recordedAt: new Date().toISOString(),
-			})}\n`,
-		);
+			const child = spawnDetachedOrphanChild();
+			child.unref();
+			const childPid = child.pid;
+			expect(childPid).toBeTypeOf("number");
+			const kernelPid = 999_999;
+			// Pid-only record: the kernel crashed before the start-id query landed.
+			appendFileSync(
+				path,
+				`${JSON.stringify({
+					version: 1,
+					pid: childPid,
+					ownerPid: process.pid,
+					kernelPid,
+					active: true,
+					recordedAt: new Date().toISOString(),
+				})}\n`,
+			);
 
-		reapKernelOrphanProcesses(kernelPid);
+			reapKernelOrphanProcesses(kernelPid);
 
-		const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
-		await exited;
-		expect(child.signalCode).toBe("SIGKILL");
-	});
+			const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+			await exited;
+			expect(child.signalCode).toBe("SIGKILL");
+		},
+	);
 
 	it("win32 reapers ignore identity-free records", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-orphan-journal-test-"));
@@ -158,7 +183,7 @@ describe("orphan process journal", () => {
 		const path = join(directory, "orphans.jsonl");
 		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = path;
 
-		const child = spawn("sleep", ["300"], { detached: true, stdio: "ignore" });
+		const child = spawnDetachedOrphanChild();
 		child.unref();
 		const childPid = child.pid;
 		expect(childPid).toBeTypeOf("number");

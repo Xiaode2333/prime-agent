@@ -6,6 +6,7 @@ import {
 	DaemonUpdateRestartStatusWriter,
 	launchDaemonUpdateRestartCoordinator,
 	readDaemonUpdateRestartStatus,
+	resolveDaemonUpdateRestartSocketPath,
 } from "../../../src/cli/daemon-update-restart.js";
 import { ENV_AGENT_DIR } from "../../../src/config.js";
 import { DaemonAgentConnection } from "../../../src/modes/agent-connection/daemon-agent-connection.js";
@@ -325,7 +326,13 @@ describe("ENG-4606 update restart coordinator", () => {
 			}),
 		);
 
-		expect(status).toMatchObject({ phase: "skipped", socketPath });
+		// The coordinator reports the socket identity it will use: Windows folds case and
+		// separators, so the status carries that identity, not the caller's exact spelling.
+		expect(status).toMatchObject({ phase: "skipped", socketPath: resolveDaemonUpdateRestartSocketPath(socketPath) });
+		// The coordinator is detached and runs with its cwd inside this temp root; Windows
+		// refuses to remove a directory that is still a live process's cwd, so let it exit
+		// before the suite harness deletes the root.
+		await waitForProcessExit(status.coordinator.pid);
 	});
 
 	it("resolves a relative custom socket before changing coordinator cwd", async () => {
@@ -344,7 +351,13 @@ describe("ENG-4606 update restart coordinator", () => {
 			}),
 		);
 
-		expect(status).toMatchObject({ phase: "skipped", socketPath });
+		// A relative socket must resolve against the launcher's cwd before the coordinator
+		// changes directory; the status reports that resolved identity.
+		expect(status).toMatchObject({ phase: "skipped", socketPath: resolveDaemonUpdateRestartSocketPath(socketPath) });
+		// The coordinator is detached and runs with its cwd inside this temp root; Windows
+		// refuses to remove a directory that is still a live process's cwd, so let it exit
+		// before the suite harness deletes the root.
+		await waitForProcessExit(status.coordinator.pid);
 	});
 
 	it("outlives a daemon-owned updater and restores the exact custom socket", async () => {

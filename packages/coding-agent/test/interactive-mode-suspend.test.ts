@@ -21,6 +21,22 @@ function callHandleCtrlZ(context: HandleCtrlZThis): void {
 	(interactiveModePrototype as InteractiveModePrototypeWithHandleCtrlZ).handleCtrlZ.call(context);
 }
 
+/**
+ * Pin process.platform for one call. handleCtrlZ branches on it, so a test that
+ * covers the POSIX suspend path must not depend on the host being POSIX.
+ */
+function withPlatform(platform: NodeJS.Platform, run: () => void): void {
+	const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
+	Object.defineProperty(process, "platform", { configurable: true, value: platform });
+	try {
+		run();
+	} finally {
+		if (descriptor) {
+			Object.defineProperty(process, "platform", descriptor);
+		}
+	}
+}
+
 const interactiveModePrototype = InteractiveMode.prototype as unknown;
 
 describe("InteractiveMode.handleCtrlZ", () => {
@@ -36,23 +52,12 @@ describe("InteractiveMode.handleCtrlZ", () => {
 		};
 		const showStatus = vi.fn();
 		const context: HandleCtrlZThis & { showStatus: (message: string) => void } = { ui, showStatus };
-		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
-		Object.defineProperty(process, "platform", {
-			configurable: true,
-			value: "win32",
-		});
 		const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
 		const processOnSpy = vi.spyOn(process, "on");
 		const processOnceSpy = vi.spyOn(process, "once");
 		const processKillSpy = vi.spyOn(process, "kill");
 
-		try {
-			callHandleCtrlZ(context);
-		} finally {
-			if (platformDescriptor) {
-				Object.defineProperty(process, "platform", platformDescriptor);
-			}
-		}
+		withPlatform("win32", () => callHandleCtrlZ(context));
 
 		expect(showStatus).toHaveBeenCalledWith("Suspend to background is not supported on Windows");
 		expect(ui.stop).not.toHaveBeenCalled();
@@ -94,7 +99,8 @@ describe("InteractiveMode.handleCtrlZ", () => {
 			.mockImplementation(((_event: string, _listener: () => void) => process) as typeof process.removeListener);
 		const processKillSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
 
-		callHandleCtrlZ(context);
+		// The POSIX path: pin the platform so this runs on Windows too.
+		withPlatform("linux", () => callHandleCtrlZ(context));
 
 		expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 2 ** 30);
 		expect(processOnSpy).toHaveBeenCalledWith("SIGINT", expect.any(Function));
@@ -138,7 +144,10 @@ describe("InteractiveMode.handleCtrlZ", () => {
 			throw suspendError;
 		});
 
-		expect(() => callHandleCtrlZ(context)).toThrow(suspendError);
+		// The POSIX path: pin the platform so this runs on Windows too.
+		withPlatform("linux", () => {
+			expect(() => callHandleCtrlZ(context)).toThrow(suspendError);
+		});
 		expect(ui.stop).toHaveBeenCalledTimes(1);
 		expect(setIntervalSpy).toHaveBeenCalledTimes(1);
 		expect(clearIntervalSpy).toHaveBeenCalledWith(keepAliveHandle);

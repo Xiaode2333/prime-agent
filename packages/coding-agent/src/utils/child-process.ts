@@ -74,7 +74,11 @@ export function execFileSyncHidden(
 	return execFileSync(file, args, { ...options, windowsHide: true });
 }
 
-const WINDOWS_SHELL_COMMANDS = new Set(["npm", "npx", "pnpm", "yarn", "yarnpkg", "corepack"]);
+// Package managers installed as a `.cmd` shim on Windows (bun ships `bun.cmd` for a
+// user-scoped install) need a shell, because libuv cannot spawn a batch file
+// directly. A real `bun.exe` is spawnable without one, so listing the name only
+// routes the shim case through the shell.
+const WINDOWS_SHELL_COMMANDS = new Set(["npm", "npx", "pnpm", "yarn", "yarnpkg", "corepack", "bun"]);
 
 export function shouldUseWindowsShell(command: string): boolean {
 	if (process.platform !== "win32") return false;

@@ -1150,17 +1150,24 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 
 	it("unwinds real pre-bind and post-bind startup failures before retry", async () => {
 		const paths = await createPaths();
-		writeFileSync(paths.socketPath, "not a socket");
-		const preBindFailure = spawnFixture("supervisor", paths);
-		await waitForType(preBindFailure, "booted");
-		send(preBindFailure, "go");
-		expect(await waitForType(preBindFailure, "failed")).toMatchObject({
-			error: expect.stringContaining("is not a socket"),
-		});
-		await waitForExit(preBindFailure);
-		expect(listOwnerRecords(paths.registryDir)).toEqual([]);
-		expect(existsSync(`${paths.socketPath}.lock`)).toBe(false);
-		rmSync(paths.socketPath, { force: true });
+		// Pre-bind: a stale non-socket file at the socket path. The prepare step that
+		// rejects it is POSIX-only (prepareDaemonSocketPath returns early on win32), and a
+		// Windows endpoint is a named pipe, so this phase cannot be built there. Vitest 4's
+		// skipIf takes no reason argument; the post-bind phase below is cross-platform, so
+		// only this block is gated.
+		if (process.platform !== "win32") {
+			writeFileSync(paths.socketPath, "not a socket");
+			const preBindFailure = spawnFixture("supervisor", paths);
+			await waitForType(preBindFailure, "booted");
+			send(preBindFailure, "go");
+			expect(await waitForType(preBindFailure, "failed")).toMatchObject({
+				error: expect.stringContaining("is not a socket"),
+			});
+			await waitForExit(preBindFailure);
+			expect(listOwnerRecords(paths.registryDir)).toEqual([]);
+			expect(existsSync(`${paths.socketPath}.lock`)).toBe(false);
+			rmSync(paths.socketPath, { force: true });
+		}
 
 		writeFileSync(getCronJobsPath(paths.agentDir), "{ malformed\n");
 		const postBindFailure = spawnFixture("supervisor", paths);
