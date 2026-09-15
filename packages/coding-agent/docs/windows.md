@@ -115,6 +115,23 @@ What works on native Windows, and what does not:
 | Native self-update | Not applicable without a standalone build. Update by re-running `install.ps1`, which resolves the latest stable release. |
 | `shellPath` for gates | Autonomous quality gates follow the same shell resolution as the shell tool, but do not read `shellPath` yet. |
 
+## Closing the Terminal
+
+A Windows console gives a process no catchable signal when its window closes, so a
+`prime-agent` running in that window is terminated without running its teardown. Its
+sessions and kernel state are preserved through the incremental snapshots it writes while
+it works.
+
+To stop cleanly, either exit the interactive UI from inside it, or stop the background
+service from another terminal:
+
+```powershell
+prime-agent shutdown --force
+```
+
+That stops every agent, worker, and daemon, and it is also what frees the native modules
+that otherwise make `npm uninstall -g prime-agent` fail with `EBUSY`.
+
 ## Troubleshooting
 
 - `prime-agent` is not recognized after install: open a new terminal, or run `$env:Path = "$env:APPDATA\npm;$env:Path"` for the current session.
