@@ -205,6 +205,18 @@ async function downloadTool(tool: ManagedTool): Promise<string> {
 
 	// Create tools directory
 	mkdirSync(TOOLS_DIR, { recursive: true });
+	// Killed startups leave extract_tmp_* dirs behind (Windows refuses to delete
+	// in-use dirs, and a Ctrl+C during extraction skips the finally cleanup).
+	// Remove them best-effort so the bin dir does not accumulate garbage.
+	try {
+		for (const entry of readdirSync(TOOLS_DIR, { withFileTypes: true })) {
+			if (entry.isDirectory() && entry.name.startsWith("extract_tmp_")) {
+				rmSync(join(TOOLS_DIR, entry.name), { recursive: true, force: true });
+			}
+		}
+	} catch {
+		// Best effort; a locked dir is cleaned on a later run.
+	}
 
 	const downloadUrl = `https://github.com/${config.repo}/releases/download/${config.tagPrefix}${version}/${assetName}`;
 	const archivePath = join(TOOLS_DIR, assetName);
@@ -230,7 +242,33 @@ async function downloadTool(tool: ManagedTool): Promise<string> {
 				throw new Error(`Failed to extract ${assetName}: ${errMsg}`);
 			}
 		} else if (assetName.endsWith(".zip")) {
-			await extractZip(archivePath, { dir: extractDir });
+			// extract-zip hangs on Windows for these archives (no resolution, no
+			// rejection), blocking interactive startup with no output. Windows
+			// ships bsdtar, which extracts zips reliably; PowerShell
+			// Expand-Archive is the fallback when tar is unavailable.
+			if (plat === "win32") {
+				const tarResult = spawnSyncHidden("tar", ["-xf", archivePath, "-C", extractDir], { stdio: "pipe" });
+				if (tarResult.error || tarResult.status !== 0) {
+					const expandResult = spawnSyncHidden(
+						"powershell",
+						[
+							"-NoProfile",
+							"-NonInteractive",
+							"-Command",
+							`Expand-Archive -LiteralPath ${JSON.stringify(archivePath)} -DestinationPath ${JSON.stringify(extractDir)} -Force`,
+						],
+						{ stdio: "pipe" },
+					);
+					if (expandResult.error || expandResult.status !== 0) {
+						const tarMsg = tarResult.error?.message ?? tarResult.stderr?.toString().trim() ?? "unknown error";
+						const expandMsg =
+							expandResult.error?.message ?? expandResult.stderr?.toString().trim() ?? "unknown error";
+						throw new Error(`Failed to extract ${assetName} (tar: ${tarMsg}; Expand-Archive: ${expandMsg})`);
+					}
+				}
+			} else {
+				await extractZip(archivePath, { dir: extractDir });
+			}
 		} else {
 			throw new Error(`Unsupported archive format: ${assetName}`);
 		}
