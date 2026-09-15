@@ -121,7 +121,15 @@ at it, and then the kernel keeps the POSIX behaviour.
 ## Uninstall
 
 ```powershell
-npm uninstall -g prime-agent
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
 ```
 
-The Python kernel virtual environment and configuration live under `%USERPROFILE%\.prime\agent`. uv installs to `%USERPROFILE%\.local\bin`.
+That stops the background service first, so the daemon does not hold native modules open while npm removes them, then removes the global package. Session history and configuration stay in `%USERPROFILE%\.prime`.
+
+To remove the data as well — sessions, settings, the Python kernel virtual environment, and the uv binaries prime-agent installed:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall -PurgeData
+```
+
+Without a checkout, the equivalent manual commands are `prime-agent shutdown --force` followed by `npm uninstall -g prime-agent`.

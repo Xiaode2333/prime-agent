@@ -124,6 +124,7 @@ import { handleConfigCommand } from "./package-manager-cli.js";
 import { isLocalPath } from "./utils/paths.js";
 import { readPipedStdin } from "./utils/piped-stdin.js";
 import { ensureDirectoryHardened } from "./utils/secure-dir.js";
+import { windowsTerminalHint } from "./utils/windows-terminal.js";
 
 function collectSettingsDiagnostics(
 	settingsManager: SettingsManager,
@@ -1173,6 +1174,13 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("parseArgs");
 	const appMode = resolveAppMode(parsed, process.stdin.isTTY);
+	if (appMode === "print" && !parsed.print) {
+		// Only explain a print-mode fallback the user did not ask for.
+		const terminalHint = windowsTerminalHint();
+		if (terminalHint) {
+			process.stderr.write(`${terminalHint}\n`);
+		}
+	}
 
 	if (shouldRejectNonInteractiveAttach(publicCommand.attachAgent, appMode)) {
 		console.error(chalk.red("Error: attach requires an interactive terminal"));

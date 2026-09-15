@@ -37,6 +37,14 @@
   Skip install-time Python kernel preparation. The kernel is then prepared on
   first run instead.
 
+.PARAMETER Uninstall
+  Stop the background service, remove the global package, and exit. User data
+  under %USERPROFILE%\.prime is kept unless -PurgeData is also given.
+
+.PARAMETER PurgeData
+  With -Uninstall, also remove the agent data directory (sessions, settings, the
+  Python kernel virtual environment, and the uv binaries prime-agent installed).
+
 .PARAMETER SkipPath
   Do not adjust the user PATH.
 
@@ -52,7 +60,9 @@ param(
 	[string]$NpmPrefix,
 	[switch]$SkipUv,
 	[switch]$SkipKernel,
-	[switch]$SkipPath
+	[switch]$SkipPath,
+	[switch]$Uninstall,
+	[switch]$PurgeData
 )
 
 $ErrorActionPreference = "Stop"
@@ -400,7 +410,74 @@ function Test-InstalledCommand {
 	return $null
 }
 
+function Invoke-PrimeAgentUninstall {
+	Write-Info "Prime Agent uninstaller (Windows)"
+
+	$toolchain = Get-NodeToolchain
+	$prefix = $NpmPrefix
+	if ([string]::IsNullOrEmpty($prefix)) {
+		$prefix = Get-NpmGlobalPrefix $toolchain.Npm
+	}
+
+	# A running daemon holds native modules open, which makes npm fail with EBUSY
+	# while it removes the tree, so stop it first. shutdown --force reports the
+	# daemons it stopped; a failure here must not block the removal.
+	$shim = Join-Path $prefix "prime-agent.cmd"
+	if (Test-Path $shim) {
+		Write-Info "stopping background services"
+		try {
+			& $shim shutdown --force 2>&1 | ForEach-Object { Write-Host $_ }
+		} catch {
+			Write-Warn "could not stop the background service: $($_.Exception.Message)"
+		}
+	}
+
+	Write-Info "removing the global package"
+	$attempt = 0
+	while ($true) {
+		$attempt += 1
+		$output = & $toolchain.Npm uninstall -g prime-agent --no-fund --no-audit 2>&1
+		$code = $LASTEXITCODE
+		foreach ($line in $output) { Write-Host $line }
+		if ($code -eq 0) { break }
+		if ($attempt -ge 3 -or -not (Test-NpmLockError ($output | Out-String))) {
+			Fail "npm uninstall failed with exit code $code"
+		}
+		Write-Warn "npm hit a Windows file lock (attempt $attempt of 3); retrying"
+		Start-Sleep -Seconds (2 * $attempt)
+		Remove-StaleNpmStagingDirectories -Prefix $prefix -PackageName "prime-agent"
+	}
+
+	if ($PurgeData) {
+		$agentDir = Join-Path $env:USERPROFILE ".prime"
+		if (Test-Path $agentDir) {
+			Write-Info "removing $agentDir"
+			Remove-Item -Recurse -Force $agentDir -ErrorAction SilentlyContinue
+		}
+		$uvDir = Join-Path $env:USERPROFILE ".local\bin"
+		foreach ($binary in @("uv.exe", "uvx.exe", "uvw.exe")) {
+			$candidate = Join-Path $uvDir $binary
+			if (Test-Path $candidate) { Remove-Item -Force $candidate -ErrorAction SilentlyContinue }
+		}
+	}
+
+	Write-Host ""
+	Write-Host "Prime Agent removed."
+	if (-not $PurgeData) {
+		Write-Host "Session history and configuration remain in $env:USERPROFILE\.prime."
+		Write-Host "Remove them with: .\install.ps1 -Uninstall -PurgeData"
+	}
+}
+
 function Invoke-Main {
+	if ($Uninstall) {
+		if ($env:OS -ne "Windows_NT") {
+			Fail "this uninstaller is for Windows. Use install.sh on macOS or Linux."
+		}
+		Invoke-PrimeAgentUninstall
+		return
+	}
+
 	if ($env:OS -ne "Windows_NT") {
 		Fail "this installer is for Windows. Use install.sh on macOS or Linux."
 	}
