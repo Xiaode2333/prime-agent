@@ -4,7 +4,13 @@ import { lstat, readlink } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { AssistantMessage, Usage, UserMessage } from "@earendil-works/pi-ai";
 import { spawnHidden, waitForChildProcess } from "../utils/child-process.js";
-import { killProcessTree, trackDetachedChildPid, untrackDetachedChildPid } from "../utils/shell.js";
+import {
+	getShellConfig,
+	killProcessTree,
+	type ShellConfig,
+	trackDetachedChildPid,
+	untrackDetachedChildPid,
+} from "../utils/shell.js";
 
 export interface AgentAutonomousConfig {
 	enabled?: boolean;
@@ -472,11 +478,19 @@ async function runAutonomousQualityGates(
 			};
 			return attempt > state.gates.maxRetries ? "retry_exhausted" : "failed";
 		}
-		const result = await runChildProcess(command, [], {
+		// Run the gate in the shell the agent itself uses (the same resolution as the
+		// bash tool), so a gate command means the same thing to the user and to the
+		// gate runner on every platform. wrapCommand maps the command's own outcome
+		// onto the process exit code: PowerShell exits 0 for a failed cmdlet and
+		// reports native failures only through $LASTEXITCODE.
+		const gateShell = getShellConfig();
+		const shellCommand = gateShell.wrapCommand ? gateShell.wrapCommand(command) : command;
+		const gateProcess = gateShellSpawn(gateShell, shellCommand);
+		const result = await runChildProcess(gateProcess.file, gateProcess.args, {
 			cwd,
-			shell: true,
 			timeoutMs: state.gates.timeoutMs,
 			maxOutputChars: MAX_GATE_OUTPUT_CHARS,
+			windowsVerbatimArguments: gateProcess.windowsVerbatimArguments,
 			signal,
 		});
 		signal?.throwIfAborted();
@@ -632,6 +646,24 @@ async function hashUntrackedPath(path: string, signal?: AbortSignal): Promise<st
 	}
 }
 
+/**
+ * Spawn specification for one gate command in its resolved shell. POSIX shells
+ * and PowerShell receive the command as a single argv element. cmd.exe parses
+ * the command line itself, so a gate command whose first argument is quoted
+ * (`"C:\Program Files\nodejs\node.exe" "-e" ...`, the normal Windows case)
+ * survives only as verbatim arguments wrapped in one extra quote pair, exactly
+ * what Node's own `shell: true` does.
+ */
+function gateShellSpawn(
+	shell: ShellConfig,
+	command: string,
+): { file: string; args: string[]; windowsVerbatimArguments: boolean } {
+	if (shell.kind === "cmd") {
+		return { file: shell.shell, args: [...shell.args, `"${command}"`], windowsVerbatimArguments: true };
+	}
+	return { file: shell.shell, args: [...shell.args, command], windowsVerbatimArguments: false };
+}
+
 interface ChildProcessResult {
 	status: number | null;
 	signal: NodeJS.Signals | null;
@@ -647,9 +679,9 @@ function runChildProcess(
 	args: string[],
 	options: {
 		cwd?: string;
-		shell?: boolean;
 		timeoutMs?: number;
 		maxOutputChars?: number;
+		windowsVerbatimArguments?: boolean;
 		signal?: AbortSignal;
 	} = {},
 ): Promise<ChildProcessResult> {
@@ -658,7 +690,7 @@ function runChildProcess(
 		const child = spawnHidden(command, args, {
 			cwd: options.cwd,
 			detached: process.platform !== "win32",
-			shell: options.shell === true,
+			windowsVerbatimArguments: options.windowsVerbatimArguments === true,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 		if (child.pid) {

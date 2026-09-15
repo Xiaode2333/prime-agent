@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import {
@@ -6,6 +7,7 @@ import {
 	DEFAULT_AUTONOMOUS_LIMITS,
 	DEFAULT_AUTONOMOUS_SUBAGENT_KEEP_ALIVE_MS,
 } from "../src/core/autonomous.js";
+import { failingGateCommand, passingGateCommand } from "./gate-command.js";
 
 type FakeAssistantMessage = { role: "assistant"; stopReason: string };
 
@@ -290,11 +292,11 @@ describe("autonomous continuation vs active subagents", () => {
 	it("skips the owed continuation when configured gates pass at settlement", async () => {
 		const session = fakeSession({
 			_autonomousContinuationAwaitsRlmWork: true,
-			_cwd: "/tmp",
+			_cwd: tmpdir(),
 			_autonomousState: createAutonomousRuntimeState({
 				enabled: true,
 				maxContinuations: 5,
-				gates: { commands: ["true"] },
+				gates: { commands: [passingGateCommand()] },
 			}),
 		});
 		maybeResume.call(session);
@@ -307,11 +309,11 @@ describe("autonomous continuation vs active subagents", () => {
 	it("delivers a gate-failure continuation when configured gates fail at settlement", async () => {
 		const session = fakeSession({
 			_autonomousContinuationAwaitsRlmWork: true,
-			_cwd: "/tmp",
+			_cwd: tmpdir(),
 			_autonomousState: createAutonomousRuntimeState({
 				enabled: true,
 				maxContinuations: 5,
-				gates: { commands: ["false"] },
+				gates: { commands: [failingGateCommand()] },
 			}),
 		});
 		maybeResume.call(session);
@@ -412,11 +414,11 @@ describe("autonomous continuation vs active subagents", () => {
 	it("drops a stale owed continuation when user-driven work arrives during the gate evaluation", async () => {
 		const session = fakeSession({
 			_autonomousContinuationAwaitsRlmWork: true,
-			_cwd: "/tmp",
+			_cwd: tmpdir(),
 			_autonomousState: createAutonomousRuntimeState({
 				enabled: true,
 				maxContinuations: 5,
-				gates: { commands: ["false"] },
+				gates: { commands: [failingGateCommand()] },
 			}),
 		});
 		maybeResume.call(session);
@@ -433,11 +435,11 @@ describe("autonomous continuation vs active subagents", () => {
 	it("delivers past sibling terminal notices admitted during the gate evaluation", async () => {
 		const session = fakeSession({
 			_autonomousContinuationAwaitsRlmWork: true,
-			_cwd: "/tmp",
+			_cwd: tmpdir(),
 			_autonomousState: createAutonomousRuntimeState({
 				enabled: true,
 				maxContinuations: 5,
-				gates: { commands: ["false"] },
+				gates: { commands: [failingGateCommand()] },
 			}),
 		});
 		maybeResume.call(session);
@@ -455,11 +457,11 @@ describe("autonomous continuation vs active subagents", () => {
 	it("keeps a user-reset budget when dropping a stale owed continuation", async () => {
 		const session = fakeSession({
 			_autonomousContinuationAwaitsRlmWork: true,
-			_cwd: "/tmp",
+			_cwd: tmpdir(),
 			_autonomousState: createAutonomousRuntimeState({
 				enabled: true,
 				maxContinuations: 5,
-				gates: { commands: ["false"] },
+				gates: { commands: [failingGateCommand()] },
 			}),
 		});
 		maybeResume.call(session);
@@ -477,13 +479,13 @@ describe("autonomous continuation vs active subagents", () => {
 	it("evaluates gates from the transcript after agent_end clears the live last-assistant field", async () => {
 		const session = fakeSession({
 			_autonomousContinuationAwaitsRlmWork: true,
-			_cwd: "/tmp",
+			_cwd: tmpdir(),
 			_lastAssistantMessage: undefined,
 			agent: { signal: undefined, state: { messages: [stoppedTurn] } },
 			_autonomousState: createAutonomousRuntimeState({
 				enabled: true,
 				maxContinuations: 5,
-				gates: { commands: ["true"] },
+				gates: { commands: [passingGateCommand()] },
 			}),
 		});
 		maybeResume.call(session);

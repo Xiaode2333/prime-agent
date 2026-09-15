@@ -13,6 +13,8 @@ import { DaemonSupervisor } from "../../../src/modes/daemon/daemon-supervisor.js
 import { waitForHeadlessCompletion } from "../../../src/modes/headless-completion.js";
 import { RpcClient } from "../../../src/modes/rpc/rpc-client.js";
 import { createRpcExtensionUiBridge } from "../../../src/modes/rpc/rpc-extension-ui-context.js";
+import { passingGateCommand } from "../../gate-command.js";
+import { testSocketPath } from "../../socket-path.js";
 import { createHarness, getAssistantTexts, getUserTexts, type Harness } from "../harness.js";
 
 const fixturePath = resolve(__dirname, "../../fixtures/rpc-connection-mode-fixture.ts");
@@ -198,7 +200,7 @@ describe("ENG-4685 daemon-backed client modes", () => {
 	});
 
 	it("runs host-owned autonomous gate retries through the shared completion loop", async () => {
-		const gate = `${process.execPath} -e "process.exit(0)"`;
+		const gate = passingGateCommand();
 		const harness = await createHarness({
 			autonomous: {
 				enabled: true,
@@ -245,7 +247,8 @@ describe("ENG-4685 daemon-backed client modes", () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-agent-4685-clients-"));
 		tempRoots.add(root);
 		const agentDir = join(root, "agent dir");
-		const socketPath = join(root, "daemon.sock");
+		// Windows accepts only a named pipe as a listen endpoint; a POSIX-style path fails with EACCES.
+		const socketPath = testSocketPath(root, "daemon.sock");
 		daemonSockets.add(socketPath);
 		const baseArgs = [
 			"--daemon-socket",
@@ -276,7 +279,15 @@ describe("ENG-4685 daemon-backed client modes", () => {
 				expect(result.stdout).toContain('"command":"get_state","success":true');
 			}
 		}
-		expect(existsSync(socketPath)).toBe(true);
+		// The endpoint is real: a POSIX socket file exists on disk, while a Windows
+		// named pipe only proves itself by accepting a client connect.
+		if (process.platform === "win32") {
+			const probe = new DaemonClient(socketPath);
+			await probe.connect(2000);
+			probe.close();
+		} else {
+			expect(existsSync(socketPath)).toBe(true);
+		}
 	}, 90_000);
 
 	it("keeps the rollback frontend fully off the daemon path", async () => {
@@ -313,7 +324,7 @@ describe("ENG-4685 daemon-backed client modes", () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-agent-4685-services-"));
 		tempRoots.add(root);
 		const agentDir = join(root, "agent");
-		const socketPath = join(root, "daemon.sock");
+		const socketPath = testSocketPath(root, "daemon.sock");
 		const markerPath = join(root, "extension-loads.txt");
 		const extensionPath = join(root, "load-marker.ts");
 		daemonSockets.add(socketPath);
@@ -376,7 +387,7 @@ describe("ENG-4685 daemon-backed client modes", () => {
 	it("drains accepted daemon RPC prompt work before EOF", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-agent-4685-rpc-eof-"));
 		tempRoots.add(root);
-		const socketPath = join(root, "daemon.sock");
+		const socketPath = testSocketPath(root, "daemon.sock");
 		daemonSockets.add(socketPath);
 		const result = await runCli(
 			[

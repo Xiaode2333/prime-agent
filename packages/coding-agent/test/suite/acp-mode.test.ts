@@ -6,6 +6,7 @@ import type { AgentSessionRuntime } from "../../src/core/agent-session-runtime.j
 import { PRIME_AGENT_META_NAMESPACE } from "../../src/modes/acp/acp-meta.js";
 import { runAcpModeWithConnection } from "../../src/modes/acp/index.js";
 import { InProcessAgentConnection } from "../../src/modes/agent-connection/in-process-agent-connection.js";
+import { passingGateCommand } from "../gate-command.js";
 import { createHarness } from "./harness.js";
 
 /** Minimal AgentSessionRuntime host over a real faux-backed AgentSession. */
@@ -292,7 +293,7 @@ describe("ACP mode end to end", () => {
 				maxTurns: 2,
 				maxContinuations: 3,
 				maxTokens: 80_000,
-				gates: { commands: ["true"], maxRetries: 3 },
+				gates: { commands: [passingGateCommand()], maxRetries: 3 },
 			},
 		});
 		let releaseInjected!: () => void;
