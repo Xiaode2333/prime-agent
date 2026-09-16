@@ -53,11 +53,18 @@ export function countRosterSubagentStatuses(
 	parent: { activeSessionId?: string | undefined; sessionId?: string | undefined; sessionFile?: string | undefined },
 ): SubagentSummaryCounts {
 	const counts: SubagentSummaryCounts = { total: 0, running: 0, idle: 0, inactive: 0 };
-	// The daemon roster spans every tree: count live rows in this session's subtree, at any depth.
+	// The daemon roster spans every tree: count this session's subagents, at any
+	// depth. Archived rows count too, as inactive: the daemon archives a session
+	// and its descendants on shutdown and on update, so a resumed session would
+	// otherwise lose its whole subagent census (the Windows install route restarts
+	// the daemon far more often than a Linux host). Only drafts stay out: a
+	// message-less subagent holds no work yet and is not a resume entry.
 	for (const child of collectSubagentDescendantSummaries(summaries, parent)) {
-		if (child.lifecycle !== "live") continue;
+		if (child.lifecycle === "draft") continue;
 		counts.total += 1;
-		counts[child.rosterStatus ?? classifySessionRosterStatus(child)] += 1;
+		counts[
+			child.lifecycle === "archived" ? "inactive" : (child.rosterStatus ?? classifySessionRosterStatus(child))
+		] += 1;
 	}
 	return counts;
 }

@@ -260,10 +260,22 @@ async function downloadTool(tool: ManagedTool): Promise<string> {
 						{ stdio: "pipe" },
 					);
 					if (expandResult.error || expandResult.status !== 0) {
-						const tarMsg = tarResult.error?.message ?? tarResult.stderr?.toString().trim() ?? "unknown error";
-						const expandMsg =
-							expandResult.error?.message ?? expandResult.stderr?.toString().trim() ?? "unknown error";
-						throw new Error(`Failed to extract ${assetName} (tar: ${tarMsg}; Expand-Archive: ${expandMsg})`);
+						// A host with no bsdtar and no Windows PowerShell leaves no native
+						// extractor at all (a stripped or AppContainer image). Use the
+						// pure-JS path there instead of failing the tool install outright;
+						// it stays off the normal path because it can stall on Windows,
+						// which is why bsdtar and Expand-Archive are tried first.
+						const missingTooling =
+							(tarResult.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT" &&
+							(expandResult.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+						if (missingTooling) {
+							await extractZip(archivePath, { dir: extractDir });
+						} else {
+							const tarMsg = tarResult.error?.message ?? tarResult.stderr?.toString().trim() ?? "unknown error";
+							const expandMsg =
+								expandResult.error?.message ?? expandResult.stderr?.toString().trim() ?? "unknown error";
+							throw new Error(`Failed to extract ${assetName} (tar: ${tarMsg}; Expand-Archive: ${expandMsg})`);
+						}
 					}
 				}
 			} else {

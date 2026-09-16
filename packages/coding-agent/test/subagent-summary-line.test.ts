@@ -387,16 +387,46 @@ describe("SubagentSummaryLine", () => {
 			parentSessionId: "other-root",
 			rosterStatus: "running",
 		} as SessionSummary;
+		// The archived child of this session still counts, as inactive: the daemon
+		// archives a session and its descendants on shutdown and on update, and a
+		// resumed session must still show the subagents it spawned. Its own live
+		// descendant counts as usual.
 		expect(
 			countRosterSubagentStatuses(
 				[rosterChild, grandchild, greatGrandchild, archivedChild, archivedGrandchild, foreign],
 				{ sessionId: "root-session" },
 			),
 		).toEqual({
-			total: 4,
+			total: 5,
 			running: 3,
 			idle: 1,
-			inactive: 0,
+			inactive: 1,
+		});
+	});
+
+	it("still counts a subagent whose session was archived by a daemon restart", () => {
+		const archivedChild = {
+			id: "ac1",
+			sessionId: "ac1",
+			lifecycle: "archived",
+			runtimeKind: "subagent",
+			rlmChildId: "ac1",
+			parentSessionId: "root-session",
+			rosterStatus: "inactive",
+		} as SessionSummary;
+		const draftChild = {
+			id: "d1",
+			sessionId: "d1",
+			lifecycle: "draft",
+			runtimeKind: "subagent",
+			rlmChildId: "d1",
+			parentSessionId: "root-session",
+		} as SessionSummary;
+		expect(countRosterSubagentStatuses([archivedChild, draftChild], { sessionId: "root-session" })).toEqual({
+			total: 1,
+			running: 0,
+			idle: 0,
+			inactive: 1,
 		});
 	});
 
