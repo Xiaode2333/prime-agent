@@ -179,27 +179,27 @@ describe("daemon supervisor ownership registry", () => {
 	it.skipIf(process.platform === "win32")(
 		"skips records whose agent dir cannot be canonicalized instead of aborting discovery",
 		async () => {
-		const paths = createPaths();
-		const owner = await acquire(paths, "discovery-owner");
-		const brokenDir = join(paths.registryDir, "broken.owner");
-		mkdirSync(brokenDir, { recursive: true, mode: 0o700 });
-		// A valid record shape whose agent dir path can no longer be canonicalized
-		// (ENOTDIR under /dev/null): one stale record must not hide the others.
-		const broken = {
-			...owner.record,
-			token: "broken-token",
-			generation: "broken-owner",
-			agentDir: "/dev/null/agent",
-			socketPath: join(paths.root, "broken.sock"),
-		};
-		writeFileSync(join(brokenDir, "owner.json"), `${JSON.stringify(broken, null, 2)}\n`);
+			const paths = createPaths();
+			const owner = await acquire(paths, "discovery-owner");
+			const brokenDir = join(paths.registryDir, "broken.owner");
+			mkdirSync(brokenDir, { recursive: true, mode: 0o700 });
+			// A valid record shape whose agent dir path can no longer be canonicalized
+			// (ENOTDIR under /dev/null): one stale record must not hide the others.
+			const broken = {
+				...owner.record,
+				token: "broken-token",
+				generation: "broken-owner",
+				agentDir: "/dev/null/agent",
+				socketPath: join(paths.root, "broken.sock"),
+			};
+			writeFileSync(join(brokenDir, "owner.json"), `${JSON.stringify(broken, null, 2)}\n`);
 
-		expect(listDaemonSupervisorSocketPathsForAgentDir(paths.agentDir, paths.registryDir)).toEqual([
-			owner.record.socketPath,
-		]);
-		expect(listDaemonSupervisorSocketPathsForAgentDir("/dev/null/agent", paths.registryDir)).toEqual([]);
+			expect(listDaemonSupervisorSocketPathsForAgentDir(paths.agentDir, paths.registryDir)).toEqual([
+				owner.record.socketPath,
+			]);
+			expect(listDaemonSupervisorSocketPathsForAgentDir("/dev/null/agent", paths.registryDir)).toEqual([]);
 
-		await owner.release();
+			await owner.release();
 		},
 	);
 
