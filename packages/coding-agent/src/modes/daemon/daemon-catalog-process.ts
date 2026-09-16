@@ -355,9 +355,11 @@ export class DaemonCatalogClient {
 			// --import takes a URL specifier: a bare Windows path is rejected by the ESM
 			// loader (ERR_UNSUPPORTED_ESM_URL_SCHEME), which killed the catalog child on
 			// startup. POSIX paths work either way.
-			const tsxEntrypoint = createRequire(import.meta.url).resolve("tsx");
+			// Resolve tsx only for a source entrypoint. A dist-only install does not ship
+			// tsx, and resolving it eagerly aborted every catalog start with
+			// MODULE_NOT_FOUND on those installs.
 			const execArgs = catalogEntry.endsWith(".ts")
-				? [...process.execArgv, "--import", pathToFileURL(tsxEntrypoint).href]
+				? [...process.execArgv, "--import", pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href]
 				: process.execArgv;
 			const launch = createCliSubprocessLaunchSpec([], undefined, execArgs, catalogEntry);
 			command = launch.command;
