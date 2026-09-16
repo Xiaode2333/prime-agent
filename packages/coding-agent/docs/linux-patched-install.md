@@ -1,9 +1,10 @@
 # Linux patched-release installation
 
 The Linux compaction-overflow safety patch is merged into
-`windows-native-support`, the branch that carries the Windows work and tracks
-upstream. Build the patched release from that branch on a Linux host;
-`linux-compaction-overflow-safety` keeps the pre-merge history of the patch.
+`windows-native-support`, the branch that carries both the Windows work and the
+Linux patch and tracks upstream. Build the patched release from that branch on
+a Linux host. The pre-merge history of the patch is kept in the
+`backup/linux-compaction-overflow-safety-8df439a` branch.
 
 ```bash
 git clone --branch windows-native-support git@github.com:Xiaode2333/prime-agent.git
