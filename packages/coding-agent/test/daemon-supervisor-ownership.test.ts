@@ -172,7 +172,13 @@ describe("daemon supervisor ownership registry", () => {
 		await legacyOwner.release();
 	});
 
-	it("skips records whose agent dir cannot be canonicalized instead of aborting discovery", async () => {
+	// Vitest 4's skipIf takes no reason argument, so the reason lives here: the fixture
+	// makes an agent dir uncanonicalizable through /dev/null, a POSIX device file. Windows
+	// resolves a path whose ancestor is missing instead of failing with ENOTDIR, so the
+	// record cannot be made uncanonicalizable there.
+	it.skipIf(process.platform === "win32")(
+		"skips records whose agent dir cannot be canonicalized instead of aborting discovery",
+		async () => {
 		const paths = createPaths();
 		const owner = await acquire(paths, "discovery-owner");
 		const brokenDir = join(paths.registryDir, "broken.owner");
@@ -194,7 +200,8 @@ describe("daemon supervisor ownership registry", () => {
 		expect(listDaemonSupervisorSocketPathsForAgentDir("/dev/null/agent", paths.registryDir)).toEqual([]);
 
 		await owner.release();
-	});
+		},
+	);
 
 	it("legacy registry reads never reclaim abandoned legacy directories", async () => {
 		const paths = createPaths();

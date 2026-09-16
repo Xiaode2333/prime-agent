@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { NATIVE_PLATFORMS } from "../src/utils/native-installation.js";
@@ -296,7 +297,7 @@ describe("release manifest schemas", () => {
 				[
 					"--input-type=module",
 					"-e",
-					`import { writeReleaseMetadata } from ${JSON.stringify(join(repository, "scripts/pack-prime-agent-release.mjs"))}; writeReleaseMetadata(${JSON.stringify(
+					`import { writeReleaseMetadata } from ${JSON.stringify(pathToFileURL(join(repository, "scripts/pack-prime-agent-release.mjs")).href)}; writeReleaseMetadata(${JSON.stringify(
 						{
 							artifactsDir: directory,
 							channel,
