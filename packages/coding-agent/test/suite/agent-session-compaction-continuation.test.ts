@@ -377,6 +377,22 @@ describe("compaction continuation", () => {
 		expect(harness.session.goalState.continuationsUsed).toBe(1);
 	});
 
+	it("makes a cancelled overflow recovery terminal instead of continuing an active goal", async () => {
+		const harness = await createHarness({ models: [{ id: "faux-1", contextWindow: 200_000 }] });
+		harnesses.push(harness);
+		harness.session.handleGoalHostRequest("goal.create", { objective: "finish the task" });
+		const internals = harness.session as unknown as SessionInternals;
+		vi.spyOn(internals, "_performCompaction").mockRejectedValue(new Error("Compaction cancelled"));
+
+		await internals._runAutoCompaction("overflow", true);
+
+		expect(harness.eventsOfType("compaction_end")).toContainEqual(
+			expect.objectContaining({ reason: "overflow", aborted: true, willRetry: false }),
+		);
+		expect(harness.session.goalState).toMatchObject({ active: false, status: "error" });
+		expect(harness.session.queuedActionCount).toBe(0);
+	});
+
 	// A stale marker (continuation already consumed, goal completed) must not be rolled back.
 	it("keeps completed-goal bookkeeping when a later threshold compaction is cancelled", async () => {
 		const sessionRef: { current?: AgentSession } = {};

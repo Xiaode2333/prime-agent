@@ -3,6 +3,7 @@ import {
 	type BranchSummaryEntry,
 	buildSessionContext,
 	type CompactionEntry,
+	type CustomMessageEntry,
 	type ModelChangeEntry,
 	type ServiceTierChangeEntry,
 	type SessionEntry,
@@ -65,6 +66,25 @@ function serviceTier(id: string, parentId: string | null, tier: "default" | "pri
 	return { type: "service_tier_change", id, parentId, timestamp: "2025-01-01T00:00:00Z", serviceTier: tier };
 }
 
+function custom(
+	id: string,
+	parentId: string | null,
+	customType: string,
+	content: string,
+	details?: unknown,
+): CustomMessageEntry {
+	return {
+		type: "custom_message",
+		id,
+		parentId,
+		timestamp: "2025-01-01T00:00:00Z",
+		customType,
+		content,
+		details,
+		display: false,
+	};
+}
+
 describe("buildSessionContext", () => {
 	describe("trivial cases", () => {
 		it("empty entries returns empty context", () => {
@@ -92,6 +112,33 @@ describe("buildSessionContext", () => {
 			const ctx = buildSessionContext(entries);
 			expect(ctx.messages).toHaveLength(4);
 			expect(ctx.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
+		});
+
+		it("coalesces transient kernel state and automatic goal continuations", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "hello"),
+				custom("2", "1", "ipython_state", "old kernel state"),
+				custom("3", "2", "ipython_state", "current kernel state"),
+				custom("4", "3", "ipython_state_restored", "old restore"),
+				custom("5", "4", "ipython_state_restored", "current restore"),
+				custom("6", "5", "goal_context", "old continuation", { kind: "continuation", goalId: "goal-a" }),
+				custom("7", "6", "goal_context", "current continuation", { kind: "continuation", goalId: "goal-a" }),
+				custom("8", "7", "goal_context", "budget update", { kind: "budget_limit", goalId: "goal-a" }),
+			];
+			const contents = buildSessionContext(entries).messages.flatMap((message) =>
+				"content" in message ? [String(message.content)] : [],
+			);
+			expect(contents).not.toContain("old kernel state");
+			expect(contents).not.toContain("old restore");
+			expect(contents).not.toContain("old continuation");
+			expect(contents).toEqual(
+				expect.arrayContaining([
+					"current kernel state",
+					"current restore",
+					"current continuation",
+					"budget update",
+				]),
+			);
 		});
 
 		it("tracks thinking level changes", () => {

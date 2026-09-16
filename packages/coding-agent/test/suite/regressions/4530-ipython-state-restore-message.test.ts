@@ -127,6 +127,28 @@ describe("ENG-4530 IPython state restore message", () => {
 		expect(render(component)).not.toContain("alpha");
 	});
 
+	it("coalesces and bounds repeated restore notices before the next turn", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const host = harness.session as unknown as StateRestoreHost;
+		const restored = (prefix: string) => Array.from({ length: 500 }, (_unused, index) => `${prefix}_${index}`);
+		const failed = (prefix: string) =>
+			Array.from({ length: 500 }, (_unused, index) => ({ name: `${prefix}_${index}`, reason: "not serializable" }));
+
+		host._onIpythonStateRestored({ restored: restored("old"), failed: [], path: "/tmp/old.dill" });
+		host._onIpythonStateRestored({ restored: restored("new"), failed: failed("failed"), path: "/tmp/new.dill" });
+
+		const notices = harness.session
+			.getPendingNextTurnMessageSnapshots()
+			.filter((message) => message.customType === IPYTHON_STATE_RESTORED_CUSTOM_TYPE);
+		expect(notices).toHaveLength(1);
+		const text = getMessageText(notices[0]!);
+		expect(text).toContain("new_0");
+		expect(text).not.toContain("old_0");
+		expect(text).toContain("more");
+		expect(text.length).toBeLessThan(3000);
+	});
+
 	it("retries only undelivered input after partial scheduler delivery", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
