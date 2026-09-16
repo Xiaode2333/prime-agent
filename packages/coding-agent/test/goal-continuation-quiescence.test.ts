@@ -3,12 +3,14 @@ import { AgentSession } from "../src/core/agent-session.js";
 
 type Harness = {
 	_goalState: { status: string; objective?: string; continuationsUsed: number };
+	_overflowRecovery: "idle" | "attempted" | "reported";
 	_goalContinuationAwaitsRlmWork: boolean;
 	_disposed: boolean;
 	_disposing: boolean;
 	_sessionInputAdmissionPauses: Set<symbol>;
 	_sessionInputPumpSuspended: boolean;
 	_hasUnsettledRlmQuiescenceWork: () => boolean;
+	_hasFutureActiveRlmHeartbeat: () => boolean;
 	_stopGoalContinuationForTerminalMessage: () => boolean;
 	_ensureGoalRuntimeActive: () => void;
 	_setGoalState: (goal: unknown) => void;
@@ -27,12 +29,14 @@ const maybeResume = Reflect.get(AgentSession.prototype, "_maybeResumeGoalContinu
 function harness(overrides: Partial<Harness> = {}): Harness {
 	return {
 		_goalState: { status: "active", objective: "ship it", continuationsUsed: 0 },
+		_overflowRecovery: "idle",
 		_goalContinuationAwaitsRlmWork: false,
 		_disposed: false,
 		_disposing: false,
 		_sessionInputAdmissionPauses: new Set(),
 		_sessionInputPumpSuspended: false,
 		_hasUnsettledRlmQuiescenceWork: () => false,
+		_hasFutureActiveRlmHeartbeat: () => false,
 		_stopGoalContinuationForTerminalMessage: () => false,
 		_ensureGoalRuntimeActive: () => {},
 		_setGoalState: function (this: Harness, goal: unknown) {
@@ -63,6 +67,13 @@ describe("goal continuation vs unsettled subagent work", () => {
 		expect(messages).toHaveLength(1);
 		expect(mode._goalContinuationAwaitsRlmWork).toBe(false);
 		expect(mode._goalState.continuationsUsed).toBe(1);
+	});
+
+	it("does not automatically continue an active goal while an RLM heartbeat is armed", async () => {
+		const mode = harness({ _hasFutureActiveRlmHeartbeat: () => true });
+		await expect(getGoalContinuation.call(mode, context)).resolves.toEqual([]);
+		expect(mode._goalState).toMatchObject({ status: "active", continuationsUsed: 0 });
+		expect(mode._admitSessionInput).not.toHaveBeenCalled();
 	});
 
 	it("resumes a deferred continuation exactly once, unqueued, idle-waking, and counted", () => {

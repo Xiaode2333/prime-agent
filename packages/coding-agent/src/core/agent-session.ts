@@ -59,7 +59,6 @@ import {
 	isAgentSessionMessagePrompt,
 	normalizeAgentSessionMessage,
 	parseAgentSessionMessagePromptId,
-	startsAgentRun,
 } from "./agent-messages.js";
 import {
 	AGENT_OBSERVE_SKILL_NAME,
@@ -260,6 +259,7 @@ import {
 	createRlmDeleteSubagentHostHandler,
 	createRlmFindModelsHostHandler,
 	createRlmListSubagentsHostHandler,
+	createRlmProgressNoteHostHandler,
 	createRlmRunHostHandler,
 	findRlmModelMatches,
 	findUniqueRlmShortFormModelMatch,
@@ -273,6 +273,7 @@ import {
 	type RlmDeleteSubagentResult,
 	type RlmFindModelsResult,
 	type RlmListSubagentsResult,
+	type RlmProgressNoteResult,
 	type RlmSpawnHandle,
 	type RlmSubagentRegistryEntry,
 	type RlmSubagentRuntime,
@@ -377,6 +378,17 @@ export interface RlmChildAgentSnapshot {
 	sessionDir: string;
 	activity?: RlmChildAgentActivity;
 	repliedSinceTask?: boolean;
+	/** Latest child progress note (`rlm.progress.note`), newest wins. */
+	progressNote?: string;
+	/** Wall-clock ms of the last tracked child activity (seeded at admission, then model/tool/note events). */
+	lastActivityAt?: number;
+	/**
+	 * Active time in ms since the last tracked activity, once past the staleness
+	 * threshold, for a running child that is not executing a tool call.
+	 * Measured against the monotonic clock, so a host sleep that freezes the
+	 * session does not flag every running child stale on wake.
+	 */
+	activityStaleMs?: number;
 	error?: string;
 }
 
@@ -433,6 +445,7 @@ export type AgentSessionEvent =
 			sourceTokens?: readonly AuthSourceToken[];
 	  }
 	| { type: "rlm_child_update"; child: RlmChildAgentSnapshot }
+	| { type: "rlm_progress_note"; message: string; timestamp: number }
 	| { type: "recap_update"; recap: string | undefined }
 	| { type: "goal_update"; goal: GoalState }
 	| {
@@ -1004,6 +1017,20 @@ interface RlmChildRun {
 	answerPreview?: string;
 	toolUseCount: number;
 	activity?: RlmChildAgentActivity;
+	/** Bounded ring of the child's latest progress notes (newest last). */
+	progressNotes: string[];
+	/**
+	 * Wall-clock ms of the last tracked child activity; carried into snapshots.
+	 * Seeded at admission so a child that never emits a tracked event still
+	 * crosses the staleness threshold once running.
+	 */
+	lastActivityAt?: number;
+	/**
+	 * Monotonic counterpart of lastActivityAt (performance.now()), written by
+	 * the same events. Staleness measures this so wall-clock jumps (a host
+	 * sleep freezing the whole session) do not inflate it.
+	 */
+	lastActivityMonotonicAt?: number;
 	error?: string;
 	abort: () => void;
 	publication: AgentMessageDeferred;
@@ -1045,7 +1072,53 @@ interface RlmSubagentModelSelection {
 }
 
 const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
+const KERNEL_STATE_NAME_MAX_COUNT = 48;
+const KERNEL_STATE_NAME_MAX_CHARS = 80;
+const KERNEL_STATE_NAMES_MAX_CHARS = 1200;
+
+function describeKernelStateNames(rawNames: readonly unknown[]): string {
+	const uniqueNames: string[] = [];
+	const seen = new Set<string>();
+	for (const rawName of rawNames) {
+		const normalized = String(rawName ?? "")
+			.replace(/\s+/g, " ")
+			.trim();
+		if (!normalized || seen.has(normalized)) continue;
+		seen.add(normalized);
+		uniqueNames.push(
+			normalized.length > KERNEL_STATE_NAME_MAX_CHARS
+				? `${normalized.slice(0, KERNEL_STATE_NAME_MAX_CHARS - 1)}…`
+				: normalized,
+		);
+	}
+	const visibleNames: string[] = [];
+	let characters = 0;
+	for (const name of uniqueNames) {
+		const addedCharacters = name.length + (visibleNames.length > 0 ? 2 : 0);
+		if (
+			visibleNames.length >= KERNEL_STATE_NAME_MAX_COUNT ||
+			characters + addedCharacters > KERNEL_STATE_NAMES_MAX_CHARS
+		) {
+			break;
+		}
+		visibleNames.push(name);
+		characters += addedCharacters;
+	}
+	const omitted = uniqueNames.length - visibleNames.length;
+	return `${visibleNames.join(", ")}${omitted > 0 ? `${visibleNames.length > 0 ? ", " : ""}… +${omitted} more` : ""}`;
+}
+
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
+/** Minimum spacing between accepted progress notes from one child session. */
+const RLM_PROGRESS_NOTE_MIN_INTERVAL_MS = 10_000;
+/** Bounded ring of progress notes kept per child run; the snapshot exposes the newest. */
+const RLM_CHILD_PROGRESS_NOTE_RING_MAX = 5;
+/** A running child with no tracked activity for this long reports activityStaleMs. */
+const RLM_CHILD_STALE_ACTIVITY_THRESHOLD_MS = 10 * 60_000;
+/** Hard cap for answer previews carried into kernel roster entries. */
+const RLM_REGISTRY_ANSWER_PREVIEW_MAX_LENGTH = 200;
+/** Hard cap for labels carried into kernel roster entries (snapshots keep the full prompt). */
+const RLM_REGISTRY_LABEL_MAX_LENGTH = 200;
 
 function noopRlmChildAbort(): void {}
 function noopRlmChildEventUnsubscribe(): void {}
@@ -1229,6 +1302,45 @@ export function compactRlmText(text: string, maxLength = 160): string {
 // would only hide the divergence between near-identical sibling prompts.
 export function rlmChildLabel(prompt: string): string {
 	return prompt.replace(/\s+/g, " ").trim() || "child agent";
+}
+
+/**
+ * Record a tracked child activity on both clocks: lastActivityAt stays
+ * wall-clock ms for snapshots, and its monotonic twin bounds staleness so a
+ * host sleep cannot inflate it.
+ */
+function touchRlmChildActivity(run: RlmChildRun): void {
+	run.lastActivityAt = Date.now();
+	run.lastActivityMonotonicAt = performance.now();
+}
+
+/**
+ * Lazily computed staleness for a running child: how long since the last
+ * tracked activity, once past the threshold. Computed at snapshot build time
+ * only — no background timers update it.
+ *
+ * A tool call in flight (activity "executing") is legitimately quiet for its
+ * whole duration — a minutes-long bash() run emits no events while it works —
+ * so an executing child never reports stale. Staleness measures active time:
+ * the wall clock alone would mark every running child stale after a laptop
+ * sleep, so the smaller of the wall and monotonic clock deltas bounds it to
+ * time the host was actually awake.
+ */
+function rlmActivityStaleMs(
+	status: RlmChildAgentStatus,
+	activity: RlmChildAgentActivity | undefined,
+	lastActivityAt: number | undefined,
+	lastActivityMonotonicAt: number | undefined,
+): number | undefined {
+	if (status !== "running" || lastActivityAt === undefined) return undefined;
+	if (activity?.kind === "executing") return undefined;
+	const wallStaleMs = Date.now() - lastActivityAt;
+	const monotonicStaleMs =
+		lastActivityMonotonicAt === undefined ? wallStaleMs : performance.now() - lastActivityMonotonicAt;
+	// Integer ms like every other roster wire field: performance.now() deltas
+	// are fractional, and the kernel parser rejects non-int activity_stale_ms.
+	const staleMs = Math.floor(Math.min(wallStaleMs, monotonicStaleMs));
+	return staleMs >= RLM_CHILD_STALE_ACTIVITY_THRESHOLD_MS ? staleMs : undefined;
 }
 
 function readAssistantText(message: AssistantMessage): string {
@@ -1464,6 +1576,8 @@ export class AgentSession {
 	// Child usage not yet represented by an indexed attribution, including a delayed parent entry.
 	private _rlmUnindexedChildUsage = new WeakMap<AssistantMessage, Usage>();
 	private _activeRlmChildRuns = new Map<string, RlmChildRun>();
+	/** Wall-clock ms of the last accepted progress note; throttles rlm.progress.note. */
+	private _lastRlmProgressNoteAt: number | undefined;
 	private _unsettledRlmChildRuns = new Set<RlmChildRun>();
 	private _abandonedRlmQuiescenceChildIds = new Set<string>();
 	private _rlmQuiescenceWaitAborts = new Set<AbortController>();
@@ -2460,6 +2574,10 @@ export class AgentSession {
 	private _maybeResumeGoalContinuationAfterRlmWork(): void {
 		if (!this._goalContinuationAwaitsRlmWork) return;
 		if (this._disposed || this._disposing || this._hasUnsettledRlmQuiescenceWork()) return;
+		if (this._overflowRecovery === "reported" || this._hasFutureActiveRlmHeartbeat()) {
+			this._goalContinuationAwaitsRlmWork = false;
+			return;
+		}
 		if (this._goalState.status !== "active" || !this._goalState.objective) {
 			this._goalContinuationAwaitsRlmWork = false;
 			return;
@@ -3469,6 +3587,9 @@ export class AgentSession {
 		if (message.stopReason === "error" || message.stopReason === "aborted") {
 			return false;
 		}
+		if (this._overflowRecovery === "reported" || this._hasFutureActiveRlmHeartbeat()) {
+			return false;
+		}
 		if (this._goalState.status !== "active" || !this._goalState.objective) {
 			return false;
 		}
@@ -3925,6 +4046,20 @@ export class AgentSession {
 		return this._goalState;
 	}
 
+	private _hasFutureActiveRlmHeartbeat(now = Date.now()): boolean {
+		const controller = this._rlmHeartbeatController;
+		if (!controller) return false;
+		try {
+			return controller.listRlmHeartbeats().some((heartbeat) => {
+				if (heartbeat.status !== "active") return false;
+				const nextRunAt = Date.parse(heartbeat.nextRunAt ?? "");
+				return Number.isFinite(nextRunAt) && nextRunAt > now;
+			});
+		} catch {
+			return false;
+		}
+	}
+
 	private async _getGoalContinuationMessages(
 		context: GetContinuationMessagesContext,
 		signal?: AbortSignal,
@@ -3933,6 +4068,10 @@ export class AgentSession {
 			return [];
 		}
 		if (signal?.aborted || this._goalState.status !== "active" || !this._goalState.objective) {
+			return [];
+		}
+		if (this._overflowRecovery === "reported" || this._hasFutureActiveRlmHeartbeat()) {
+			this._goalContinuationAwaitsRlmWork = false;
 			return [];
 		}
 		// Delegating and ending the turn is correct behavior; hold the continuation
@@ -4232,7 +4371,7 @@ export class AgentSession {
 			}
 		}
 
-		if (event.type === "message_start" && startsAgentRun(event.message)) {
+		if (event.type === "message_start" && event.message.role === "user") {
 			this._overflowRecovery = "idle";
 		}
 
@@ -4282,7 +4421,7 @@ export class AgentSession {
 					// model request.
 					this._maybeStartSerializedBackgroundPlan();
 				}
-				if (assistantMsg.stopReason !== "error") {
+				if (assistantMsg.stopReason !== "error" && this._overflowRecovery !== "reported") {
 					this._overflowRecovery = "idle";
 				}
 				if (this._isConcreteProviderAuthFailure(assistantMsg)) {
@@ -5321,6 +5460,7 @@ export class AgentSession {
 	}
 
 	async promptHeartbeat(job: AgentCronJob, options?: PromptOptions): Promise<void> {
+		if (this._overflowRecovery === "reported") return;
 		const message = createHeartbeatPromptMessage(job);
 		await this._promptInjectedMessage(message.content, message, {
 			...options,
@@ -8137,11 +8277,11 @@ export class AgentSession {
 			names === null
 				? ""
 				: names.length > 0
-					? ` These names are still defined: ${names.join(", ")}.`
+					? ` These names are still defined: ${describeKernelStateNames(names)}.`
 					: " You have not defined any names yet.";
 		const prunedDetail =
 			pruned && pruned.length > 0
-				? ` Variables above the per-variable snapshot limit were removed: ${pruned.join(", ")}.`
+				? ` Variables above the per-variable snapshot limit were removed: ${describeKernelStateNames(pruned)}.`
 				: "";
 		const content = [
 			"[python-state]",
@@ -8169,10 +8309,11 @@ export class AgentSession {
 	}
 
 	private _onIpythonStateRestored(result: RestoreResult): void {
+		if (this._overflowRecovery === "reported") return;
 		const lines = ["[python-state-restored]", ""];
 		if (result.restored.length > 0) {
 			lines.push(
-				`Your Python kernel state was revived from your previous session. These names are available again: ${result.restored.join(", ")}.`,
+				`Your Python kernel state was revived from your previous session. These names are available again: ${describeKernelStateNames(result.restored)}.`,
 			);
 		} else {
 			lines.push(
@@ -8181,9 +8322,12 @@ export class AgentSession {
 		}
 		if (result.failed.length > 0) {
 			lines.push(
-				`These could not be restored and must be recreated if needed: ${result.failed.map((f) => f.name).join(", ")}.`,
+				`These could not be restored and must be recreated if needed: ${describeKernelStateNames(result.failed.map((failure) => failure.name))}.`,
 			);
 		}
+		this._pendingNextTurnMessages = this._pendingNextTurnMessages.filter(
+			(message) => message.customType !== IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
+		);
 		void this.sendCustomMessage(
 			{
 				customType: IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
@@ -8279,6 +8423,7 @@ export class AgentSession {
 			this._notifySessionInputCheckpointChange();
 			this._scheduleSessionInputPump();
 			if (didCompact) {
+				this._overflowRecovery = "idle";
 				this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
 				if (this._goalState.status === "active" && !compactionAbort.signal.aborted) {
 					this._goalContinuationAwaitsRlmWork ||= !this.agent.hasQueuedMessages();
@@ -9492,11 +9637,42 @@ export class AgentSession {
 		return calculateContextTokens(assistantMessage.usage);
 	}
 
+	private _clearQueuedOverflowRecoveryWakeups(): void {
+		const isAutomaticWakeup = (message: AgentMessage): boolean =>
+			message.role === "custom" &&
+			(message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE ||
+				message.customType === IPYTHON_STATE_RESTORED_CUSTOM_TYPE);
+		this._pendingNextTurnMessages = this._pendingNextTurnMessages.filter((message) => !isAutomaticWakeup(message));
+		this.agent.removeQueuedMessages(isAutomaticWakeup);
+		this._cancelSessionActions(
+			(action) => action.payload.kind === "turn" && isAutomaticWakeup(primaryDeliveryRecord(action).message),
+			new Error("Automatic wakeup was cleared after terminal overflow recovery."),
+		);
+		this._emitQueueUpdate();
+	}
+
+	private _latchOverflowRecovery(message: string): void {
+		if (this._overflowRecovery === "reported") return;
+		this._overflowRecovery = "reported";
+		this._pendingRequestedCompaction = undefined;
+		this._pendingRequestedRefine = undefined;
+		this._continueAfterThresholdCompaction = false;
+		this._clearQueuedGoalContexts();
+		this._clearQueuedOverflowRecoveryWakeups();
+		this._clearAutonomousContinuationAwait();
+		this._clearQueuedAutonomousContinuations({ restoreAutonomousState: true });
+		this._pendingThresholdCompactionAutonomousMessages = [];
+		this._queuedGoalThresholdContinuation = undefined;
+		this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
+		this._finishGoalWithError(message);
+	}
+
 	private async _checkCompaction(
 		assistantMessage: AssistantMessage,
 		skipAbortedCheck = true,
 		queueAutonomousContinuation = true,
 	): Promise<boolean> {
+		if (this._overflowRecovery === "reported") return false;
 		// An abort drops any compaction the model requested this turn, even on the
 		// pre-prompt path (skipAbortedCheck=false) which continues to threshold checks.
 		if (assistantMessage.stopReason === "aborted") {
@@ -9548,12 +9724,10 @@ export class AgentSession {
 		) {
 			if (this._overflowRecovery !== "idle") {
 				if (this._overflowRecovery === "attempted") {
-					this._overflowRecovery = "reported";
-					this._endCompactionUnsuccessfully(
-						"overflow",
-						"failed",
-						"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
-					);
+					const message =
+						"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.";
+					this._latchOverflowRecovery(message);
+					this._endCompactionUnsuccessfully("overflow", "failed", message);
 				}
 				return false;
 			}
@@ -9655,6 +9829,7 @@ export class AgentSession {
 		reason: "overflow" | "threshold" | "requested",
 		willRetry: boolean,
 	): Promise<boolean> {
+		if (this._overflowRecovery === "reported") return false;
 		// Any compaction consumes a pending model request and honors its instructions
 		// (overflow recovery can fire first and take the request with it).
 		const pending = this._pendingRequestedCompaction;
@@ -9698,7 +9873,13 @@ export class AgentSession {
 						: authResult.ok
 							? "no API key is available"
 							: authResult.error;
-				this._endCompactionUnsuccessfully(reason, "failed", `Compaction failed: ${detail}`);
+				const message = `Compaction failed: ${detail}`;
+				if (reason === "overflow") {
+					this._latchOverflowRecovery(`Context overflow recovery failed: ${message}`);
+					this._endCompactionUnsuccessfully(reason, "failed", message);
+					return false;
+				}
+				this._endCompactionUnsuccessfully(reason, "failed", message);
 				this._clearQueuedAutonomousContinuationsAfterSkippedThresholdCompaction(
 					reason === "threshold" && shouldContinueAfterCompaction,
 					queuedAutonomousContinuationsForThisCompaction,
@@ -9756,12 +9937,13 @@ export class AgentSession {
 				errorMessage === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
 			if (aborted) {
 				this._clearQueuedGoalContinuationAfterCancelledThresholdCompaction(queuedGoalContinuationForThisCompaction);
-				this._endCompactionUnsuccessfully(
-					reason,
-					"cancelled",
-					`${reason === "requested" ? "Requested c" : "C"}ompaction cancelled`,
-					{ aborted: true, customInstructions },
-				);
+				const message = `${reason === "requested" ? "Requested c" : "C"}ompaction cancelled`;
+				if (reason === "overflow") {
+					this._latchOverflowRecovery(
+						"Context overflow recovery was cancelled. Start a fresh session or send an explicit user prompt after reducing context.",
+					);
+				}
+				this._endCompactionUnsuccessfully(reason, "cancelled", message, { aborted: true, customInstructions });
 				return false;
 			}
 			if (error instanceof CompactionSkippedError) {
@@ -9776,16 +9958,18 @@ export class AgentSession {
 				resumeAfterFailure();
 				return false;
 			}
-			this._endCompactionUnsuccessfully(
-				reason,
-				"failed",
+			const message =
 				reason === "overflow"
 					? `Context overflow recovery failed: ${errorMessage}`
 					: reason === "requested"
 						? `Requested compaction failed: ${errorMessage}`
-						: `Auto-compaction failed: ${errorMessage}`,
-				{ customInstructions },
-			);
+						: `Auto-compaction failed: ${errorMessage}`;
+			if (reason === "overflow") {
+				this._latchOverflowRecovery(message);
+				this._endCompactionUnsuccessfully(reason, "failed", message, { customInstructions });
+				return false;
+			}
+			this._endCompactionUnsuccessfully(reason, "failed", message, { customInstructions });
 			resumeAfterFailure();
 			return false;
 		} finally {
@@ -10334,6 +10518,7 @@ export class AgentSession {
 			"rlm.collect": createRlmCollectHostHandler((targets, timeoutMs) =>
 				this.collectRlmChildren(targets, timeoutMs),
 			),
+			"rlm.progress.note": createRlmProgressNoteHostHandler((message) => this.noteRlmProgress(message)),
 			"rlm.delete_subagent": createRlmDeleteSubagentHostHandler((target) => this.deleteRlmSubagent(target)),
 			"model.info": async () => ({
 				id: this.model?.id ?? null,
@@ -10746,8 +10931,64 @@ export class AgentSession {
 		return run.session?.sessionId;
 	}
 
+	/**
+	 * Child-side progress note admission. The host wrapper validated shape and
+	 * length; this throttles per session (event-loop spam guard) and re-emits
+	 * an `rlm_progress_note` event for the parent's child-event subscription.
+	 * Pull-based only: rejected notes return a retry hint instead of an error.
+	 */
+	noteRlmProgress(message: string): RlmProgressNoteResult {
+		const now = Date.now();
+		const lastAt = this._lastRlmProgressNoteAt;
+		if (lastAt !== undefined && now - lastAt < RLM_PROGRESS_NOTE_MIN_INTERVAL_MS) {
+			return { accepted: false, retry_after_ms: RLM_PROGRESS_NOTE_MIN_INTERVAL_MS - (now - lastAt) };
+		}
+		this._lastRlmProgressNoteAt = now;
+		this._emit({ type: "rlm_progress_note", message, timestamp: now });
+		return { accepted: true, retry_after_ms: undefined };
+	}
+
 	async listRlmSubagents(): Promise<RlmListSubagentsResult> {
 		return this._buildRlmSubagentList(await this._agentMessageController?.listAgents());
+	}
+
+	/**
+	 * Project bounded snapshot fields onto kernel roster entries so the parent
+	 * model sees nearly as much as daemon clients do. Answer previews are
+	 * hard-capped here (compactRlmText already caps at 160).
+	 */
+	private _rlmRegistryExtrasFromSnapshot(
+		snapshot: RlmChildAgentSnapshot,
+	): Pick<
+		RlmSubagentRegistryEntry,
+		| "activity"
+		| "tool_use_count"
+		| "duration_ms"
+		| "answer_preview"
+		| "replied_since_task"
+		| "progress_note"
+		| "label"
+		| "last_activity_at"
+		| "activity_stale_ms"
+	> {
+		return {
+			// Project to the registry's snake_case wire shape; the Python kernel
+			// reads activity.tool_name directly from the JSON payload.
+			activity: snapshot.activity
+				? {
+						kind: snapshot.activity.kind,
+						...(snapshot.activity.toolName ? { tool_name: snapshot.activity.toolName } : {}),
+					}
+				: undefined,
+			tool_use_count: snapshot.toolUseCount,
+			duration_ms: snapshot.durationMs,
+			answer_preview: snapshot.answerPreview?.slice(0, RLM_REGISTRY_ANSWER_PREVIEW_MAX_LENGTH),
+			replied_since_task: snapshot.repliedSinceTask,
+			progress_note: snapshot.progressNote,
+			label: snapshot.label.slice(0, RLM_REGISTRY_LABEL_MAX_LENGTH),
+			last_activity_at: snapshot.lastActivityAt,
+			activity_stale_ms: snapshot.activityStaleMs,
+		};
 	}
 
 	private _buildRlmSubagentList(listedAgents?: AgentSessionMessageListResult): RlmListSubagentsResult {
@@ -10779,10 +11020,11 @@ export class AgentSession {
 				session_name: daemonChild?.sessionName ?? run.session?.sessionName ?? run.sessionName,
 				session_dir: run.sessionDir,
 				status: run.status === "done" ? "completed" : run.status === "error" ? "error" : "running",
+				...this._rlmRegistryExtrasFromSnapshot(this._rlmChildSnapshotForRun(run)),
 			});
 			recorded.add(run.id);
 		}
-		for (const [childId, { session: childSession }] of this._rlmChildSessions) {
+		for (const [childId, { session: childSession, run: retainedRun }] of this._rlmChildSessions) {
 			if (
 				this._deletingRlmChildren.has(childId) ||
 				recorded.has(childId) ||
@@ -10795,6 +11037,9 @@ export class AgentSession {
 			if (!sessionDir) {
 				continue;
 			}
+			const extrasSnapshot = retainedRun
+				? this._rlmChildSnapshotForRun(retainedRun, childSession)
+				: this._rlmChildSnapshotForSession(childId, childSession);
 			subagents.push({
 				rlm_child_id: childId,
 				active_session_id: daemonChild?.activeSessionId ?? null,
@@ -10803,6 +11048,7 @@ export class AgentSession {
 					daemonChild?.sessionName ?? childSession.sessionName ?? createDefaultRlmSubagentSessionName("", childId),
 				session_dir: sessionDir,
 				status: "completed",
+				...this._rlmRegistryExtrasFromSnapshot(extrasSnapshot),
 			});
 			recorded.add(childId);
 		}
@@ -11320,6 +11566,9 @@ export class AgentSession {
 			sessionDir: run.sessionDir,
 			activity: run.activity,
 			repliedSinceTask: child?._repliedToParentSinceTask,
+			progressNote: run.progressNotes.at(-1),
+			lastActivityAt: run.lastActivityAt,
+			activityStaleMs: rlmActivityStaleMs(run.status, run.activity, run.lastActivityAt, run.lastActivityMonotonicAt),
 			error: run.error,
 		};
 	}
@@ -11786,6 +12035,7 @@ export class AgentSession {
 		};
 		let runningToolCount = 0;
 		let childSession: AgentSession | undefined;
+		const startedMonotonicAt = performance.now();
 		const run: RlmChildRun = {
 			id: childNodeId,
 			prompt,
@@ -11794,6 +12044,11 @@ export class AgentSession {
 			model: modelSelection.model,
 			status: "queued",
 			toolUseCount: 0,
+			progressNotes: [],
+			// Seed the staleness clock at admission: a child hung before its
+			// first tracked event still crosses the threshold once running.
+			lastActivityAt: startedAt,
+			lastActivityMonotonicAt: startedMonotonicAt,
 			settled: false,
 			abort: noopRlmChildAbort,
 			publication: createAgentMessageDeferred(),
@@ -11807,7 +12062,13 @@ export class AgentSession {
 		this._unsettledRlmChildRuns.add(run);
 		const emitChildUpdate = () => {
 			const child = this._rlmChildSnapshotForRun(run);
-			const serialized = JSON.stringify(child);
+			// Dedup compares observable child state, not clock-derived fields:
+			// lastActivityAt advances on every streamed token delta and
+			// activityStaleMs is recomputed on each snapshot build, so including
+			// either would re-emit on every delta once answerPreview saturates its
+			// cap. Emitted snapshots still carry both fields fresh.
+			const { lastActivityAt: _lastActivityAt, activityStaleMs: _activityStaleMs, ...stable } = child;
+			const serialized = JSON.stringify(stable);
 			if (serialized === run.lastEmittedUpdate) return;
 			run.lastEmittedUpdate = serialized;
 			this._emit({ type: "rlm_child_update", child });
@@ -11898,10 +12159,19 @@ export class AgentSession {
 					}
 					if (event.type === "agent_start") {
 						run.activity = { kind: "waiting" };
+						touchRlmChildActivity(run);
 						emitChildUpdate();
 					} else if (event.type === "agent_end") {
 						flushPendingChildUsageAttribution();
 						run.activity = undefined;
+						touchRlmChildActivity(run);
+						emitChildUpdate();
+					} else if (event.type === "rlm_progress_note") {
+						run.progressNotes.push(event.message);
+						if (run.progressNotes.length > RLM_CHILD_PROGRESS_NOTE_RING_MAX) {
+							run.progressNotes.shift();
+						}
+						touchRlmChildActivity(run);
 						emitChildUpdate();
 					} else if (event.type === "message_end" && event.message.role === "assistant") {
 						const assistant = event.message as AssistantMessage;
@@ -11933,12 +12203,14 @@ export class AgentSession {
 						}
 						const text = compactRlmText(readAssistantText(assistant));
 						if (text) run.answerPreview = text;
+						touchRlmChildActivity(run);
 						emitChildUpdate();
 					} else if (event.type === "message_start" || event.type === "message_update") {
 						if (event.message.role === "assistant") {
 							const text = compactRlmText(readAssistantText(event.message as AssistantMessage));
 							if (text) run.answerPreview = text;
 							run.activity = { kind: "writing" };
+							touchRlmChildActivity(run);
 							emitChildUpdate();
 						}
 					} else if (event.type === "tool_execution_start") {
@@ -11946,10 +12218,12 @@ export class AgentSession {
 						run.toolUseCount += 1;
 						runningToolCount += 1;
 						run.activity = { kind: "executing", toolName: event.toolName };
+						touchRlmChildActivity(run);
 						emitChildUpdate();
 					} else if (event.type === "tool_execution_end") {
 						runningToolCount = Math.max(0, runningToolCount - 1);
 						if (runningToolCount === 0) run.activity = { kind: "waiting" };
+						touchRlmChildActivity(run);
 						emitChildUpdate();
 					} else if (event.type === "session_info_changed" || event.type === "recap_update") {
 						emitChildUpdate();

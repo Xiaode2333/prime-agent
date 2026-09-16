@@ -103,8 +103,10 @@ describe("AgentSession compaction characterization", () => {
 		await harness.session.prompt("one");
 		await harness.session.prompt("two");
 
-		const pruneOversizedVariables = vi.fn(async () => ["large_text"]);
-		const listNamespaceNames = vi.fn(async () => ["small_value"]);
+		const pruneOversizedVariables = vi.fn(async () =>
+			Array.from({ length: 100 }, (_unused, index) => `large_${index}`),
+		);
+		const listNamespaceNames = vi.fn(async () => Array.from({ length: 100 }, (_unused, index) => `small_${index}`));
 		const internals = harness.session as unknown as { _ipythonKernelProvisioner?: unknown };
 		const previousProvisioner = internals._ipythonKernelProvisioner;
 		internals._ipythonKernelProvisioner = {
@@ -125,13 +127,18 @@ describe("AgentSession compaction characterization", () => {
 		expect(pruneOversizedVariables.mock.invocationCallOrder[0] as number).toBeLessThan(
 			listNamespaceNames.mock.invocationCallOrder[0] as number,
 		);
-		expect(harness.session.messages).toContainEqual(
-			expect.objectContaining({
-				role: "custom",
-				customType: "ipython_state",
-				content: expect.stringMatching(/^\[python-state\]\n\n.*were removed: large_text/s),
-			}),
+		const kernelState = harness.session.messages.find(
+			(message) => message.role === "custom" && message.customType === "ipython_state",
 		);
+		expect(kernelState).toMatchObject({
+			role: "custom",
+			customType: "ipython_state",
+			content: expect.stringMatching(/^\[python-state\]\n\n.*were removed: large_0/s),
+		});
+		const kernelStateText = getMessageText(kernelState!);
+		expect(kernelStateText).toContain("more");
+		expect(kernelStateText).not.toContain("small_99");
+		expect(kernelStateText.length).toBeLessThan(3000);
 		expect(result.summary).toBe("summary from extension");
 		expect(compactionEntries).toHaveLength(1);
 		expect(harness.session.messages[0]?.role).toBe("compactionSummary");

@@ -496,12 +496,37 @@ export function buildSessionContext(
 	// Build messages and collect corresponding entries
 	// When there's a compaction, model context remains summary-first while the
 	// summary records where clients should present it among retained messages.
+	const latestTransientCustomEntryIds = new Map<string, string>();
+	const latestGoalContinuationEntryIds = new Map<string, string>();
+	const goalContinuationId = (entry: CustomMessageEntry): string | undefined => {
+		if (entry.customType !== "goal_context" || !entry.details || typeof entry.details !== "object") {
+			return undefined;
+		}
+		const details = entry.details as { kind?: unknown; goalId?: unknown };
+		return details.kind === "continuation" && typeof details.goalId === "string" ? details.goalId : undefined;
+	};
+	for (const entry of path) {
+		if (entry.type !== "custom_message") continue;
+		if (entry.customType === "ipython_state" || entry.customType === "ipython_state_restored") {
+			latestTransientCustomEntryIds.set(entry.customType, entry.id);
+		}
+		const goalId = goalContinuationId(entry);
+		if (goalId) latestGoalContinuationEntryIds.set(goalId, entry.id);
+	}
 	const messages: AgentMessage[] = [];
 
 	const appendMessage = (entry: SessionEntry, target = messages) => {
 		if (entry.type === "message") {
 			target.push(entry.message);
 		} else if (entry.type === "custom_message") {
+			if (
+				(entry.customType === "ipython_state" || entry.customType === "ipython_state_restored") &&
+				latestTransientCustomEntryIds.get(entry.customType) !== entry.id
+			) {
+				return;
+			}
+			const goalId = goalContinuationId(entry);
+			if (goalId && latestGoalContinuationEntryIds.get(goalId) !== entry.id) return;
 			target.push(
 				createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
 			);

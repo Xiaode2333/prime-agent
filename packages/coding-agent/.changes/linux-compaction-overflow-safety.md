@@ -1,0 +1,1 @@
+- Fixed Linux active-goal sessions to wait for scheduled RLM heartbeats and stop automatic recovery after compaction overflow.

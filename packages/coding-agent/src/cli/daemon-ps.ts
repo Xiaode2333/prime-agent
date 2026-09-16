@@ -16,6 +16,7 @@ import {
 	type DaemonRuntimeIdentity,
 } from "../modes/daemon/daemon-protocol.js";
 import { defaultDaemonSocketDir, defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
+import { createDaemonStateRootMatcher } from "../modes/daemon/daemon-state-root.js";
 import {
 	acquireDaemonShutdownAdmission,
 	type DaemonSupervisorOwnerSnapshot,
@@ -33,15 +34,18 @@ import { formatDaemonListTable } from "./daemon-ps-format.js";
 import { promptYesNo } from "./daemon-stop-confirm.js";
 
 /**
- * `daemon ps` discovers every prime-agent daemon on the machine, not just the
- * one on a single socket. Discovery has two sources merged by socket path:
+ * `daemon ps` discovers every prime-agent daemon in *our state root*, not just
+ * the one on a single socket. Discovery has two sources merged by socket path:
  *
  *  1. The OS list of listening unix sockets owned by a prime-agent process
  *     (`ss -lxp` on Linux, `lsof` on macOS). Daemons set process.title to
  *     APP_NAME and carry nothing useful in argv, so the socket→pid mapping the
  *     kernel keeps is the only reliable way to find daemons on arbitrary
  *     `--daemon-socket` paths. This is the same data as `ss -lxp | grep
- *     prime-agent`, just parsed.
+ *     prime-agent`, just parsed. The kernel list is machine-wide, so it is
+ *     filtered to our state root (see createDaemonStateRootMatcher): a daemon
+ *     started under a different HOME or agent dir is another root's business,
+ *     and stopping it from here would kill unrelated live sessions.
  *  2. A sweep of the default socket dir, which catches orphaned socket *files*
  *     left behind by daemons that are no longer running.
  *
@@ -281,14 +285,24 @@ function scanDaemonProcesses(): DaemonProcessScan {
 	if (process.platform === "win32") {
 		return scanWindowsSupervisorOwnerDaemons();
 	}
-	return { verified: scanPosixListeningDaemons(), unverified: [] };
+	return { verified: scanAllListeningDaemons(), unverified: [] };
 }
 
+/**
+ * Listening prime-agent daemons that belong to this state root. The OS sweep
+ * behind it sees every daemon the user can observe, including daemons from an
+ * isolated HOME or a different agent dir, so the result is filtered before any
+ * caller can list, signal or reap it.
+ */
 function scanListeningDaemons(): DiscoveredDaemonProcess[] {
-	return scanDaemonProcesses().verified;
+	const belongsToStateRoot = createDaemonStateRootMatcher();
+	return scanDaemonProcesses().verified.filter((daemon) => belongsToStateRoot(daemon.socketPath));
 }
 
-function scanPosixListeningDaemons(): DiscoveredDaemonProcess[] {
+function scanAllListeningDaemons(): DiscoveredDaemonProcess[] {
+	if (process.platform === "win32") {
+		return [];
+	}
 	const ss = spawnSyncHidden("ss", ["-lxp"], { encoding: "utf8" });
 	if (!ss.error && ss.status === 0 && typeof ss.stdout === "string") {
 		return enrichUptimes(parseSsListeners(ss.stdout, APP_NAME));
@@ -480,11 +494,14 @@ export function verifyHelloSupervisorPid(
 	return pid;
 }
 
-/** Discover every daemon on the machine and probe each for version + session count. */
+/** Discover every daemon in this state root and probe each for version + session count. */
 export async function discoverDaemons(): Promise<DaemonInfo[]> {
+	const belongsToStateRoot = createDaemonStateRootMatcher();
 	const scan = scanDaemonProcesses();
+	const verified = scan.verified.filter((daemon) => belongsToStateRoot(daemon.socketPath));
+	const unverified = scan.unverified.filter((process) => belongsToStateRoot(process.socketPath));
 	const processBySocket = new Map<string, DiscoveredDaemonProcess>();
-	for (const daemon of scan.verified) {
+	for (const daemon of verified) {
 		if (isWorkerSocketPath(daemon.socketPath)) {
 			continue;
 		}
@@ -492,7 +509,7 @@ export async function discoverDaemons(): Promise<DaemonInfo[]> {
 	}
 	// Probe unidentified sockets too: a reachable pipe can still name its own process.
 	const unverifiedBySocket = new Map<string, UnverifiedDaemonProcess>();
-	for (const process of scan.unverified) {
+	for (const process of unverified) {
 		if (isWorkerSocketPath(process.socketPath)) {
 			continue;
 		}
