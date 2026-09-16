@@ -1,11 +1,12 @@
 # Linux patched-release installation
 
-The Linux compaction-overflow safety patch is maintained separately from the
-`windows-native-support` branch. Use the `linux-compaction-overflow-safety`
-branch on a Linux host.
+The Linux compaction-overflow safety patch is merged into
+`windows-native-support`, the branch that carries the Windows work and tracks
+upstream. Build the patched release from that branch on a Linux host;
+`linux-compaction-overflow-safety` keeps the pre-merge history of the patch.
 
 ```bash
-git clone --branch linux-compaction-overflow-safety git@github.com:Xiaode2333/prime-agent.git
+git clone --branch windows-native-support git@github.com:Xiaode2333/prime-agent.git
 cd prime-agent
 BUN_BINARY=/path/to/bun-1.4.0 scripts/build-linux-patched-release.sh
 scripts/install-linux-patched-release.sh
@@ -18,5 +19,4 @@ baseline binary is required. The installer stages and smoke-tests a new release
 before atomically changing `~/.local/share/prime-agent/bin/prime-agent`; it
 preserves the previous target as `bin/previous`.
 
-Do not run either script on Windows. The Windows changes remain on the separate
-`windows-native-support` branch.
+Do not run either script on Windows. Use `install.ps1` there.

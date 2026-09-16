@@ -30,7 +30,7 @@ Installer options:
 | Option | Effect |
 | --- | --- |
 | `-Channel beta` | Install the beta channel instead of stable. |
-| `-Version 0.9.4` | Install a specific version. |
+| `-Version 0.9.5` | Install a specific version. |
 | `-BaseUrl <url>` | Use another release base URL. |
 | `-NpmPrefix <dir>` | Install into a specific npm global prefix. |
 | `-SkipKernel` | Skip install-time Python kernel preparation. |
@@ -112,8 +112,9 @@ What works on native Windows, and what does not:
 | Background services | `prime-agent doctor`, `status`, `ps`, and `shutdown --force` see and stop daemons through the supervisor-owner registry. |
 | Secrets and state | `%USERPROFILE%\.prime` is ACL-hardened on startup (inheritance removed, owner-only grant); a new file inherits the restriction. |
 | Compiled standalone binaries | Not published for Windows. The npm tarball route is the supported install. |
+| Upstream tracking | The branch carries upstream v0.9.5 plus the compaction-overflow recovery fix from the Linux work. |
 | Native self-update | Not applicable without a standalone build. Update by re-running `install.ps1`, which resolves the latest stable release. |
-| `shellPath` for gates | Autonomous quality gates follow the same shell resolution as the shell tool, but do not read `shellPath` yet. |
+| `shellPath` for gates | Autonomous quality gates follow the same shell resolution as the shell tool, and they read `shellPath` from settings. |
 
 ## Closing the Terminal
 
